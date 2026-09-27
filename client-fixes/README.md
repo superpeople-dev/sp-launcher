@@ -1,6 +1,6 @@
 # Client fixes
 
-Enable **Client fixes** in the launcher's Settings to load this DLL. The
+**Client fixes** in the launcher's Settings is on by default and loads this DLL. The
 **Client fixes debug window** option controls its diagnostic console on the
 next game launch and is off by default. Diagnostics still go to an attached
 debugger when the window is hidden.
