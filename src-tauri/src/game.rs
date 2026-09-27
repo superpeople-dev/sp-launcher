@@ -233,7 +233,18 @@ fn build_command(
     env: &[(String, String)],
 ) -> Command {
     let mut cmd = Command::new(exe);
-    cmd.args(args).current_dir(working_dir);
+    cmd.current_dir(working_dir);
+    for arg in args {
+        #[cfg(windows)]
+        if same_switch(arg, "-ExecCmds=") {
+            // Unreal parses the raw Windows command line. Keep the quotes
+            // around the value; Command::arg would escape and quote them again.
+            use std::os::windows::process::CommandExt;
+            cmd.raw_arg(arg);
+            continue;
+        }
+        cmd.arg(arg);
+    }
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -415,6 +426,42 @@ mod tests {
     fn keeps_quoted_spaces_together() {
         let got = parse_args(r#"-Path="C:\Program Files\x" -y"#);
         assert_eq!(got, vec![r#"-Path="C:\Program Files\x""#, "-y"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn captures_startup_command_line() {
+        let Some(path) = std::env::var_os("SP_TEST_COMMAND_LINE_OUTPUT") else { return; };
+        #[link(name = "kernel32")]
+        extern "system" { fn GetCommandLineW() -> *const u16; }
+        let text = unsafe {
+            let raw = GetCommandLineW();
+            let mut len = 0;
+            while len < 32768 && *raw.add(len) != 0 { len += 1; }
+            String::from_utf16_lossy(std::slice::from_raw_parts(raw, len))
+        };
+        fs::write(path, text).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_command_quotes_reach_windows_exactly_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("command-line.txt");
+        let args = vec![
+            "--exact".to_string(),
+            "game::tests::captures_startup_command_line".to_string(),
+            "--nocapture".to_string(),
+            "--".to_string(),
+            "-ExecCmds=\"PakFile.SearchRecentlyFoundPaks 0,stat fps\"".to_string(),
+        ];
+        let env = vec![("SP_TEST_COMMAND_LINE_OUTPUT".to_string(), output.to_string_lossy().into_owned())];
+        let status = build_command(&std::env::current_exe().unwrap(), &args, temp.path(), &env).status().unwrap();
+        assert!(status.success());
+        let raw = fs::read_to_string(output).unwrap();
+        assert!(raw.contains("-ExecCmds=\"PakFile.SearchRecentlyFoundPaks 0,stat fps\""), "{raw}");
+        assert!(!raw.contains("-ExecCmds=\"\""), "{raw}");
+        assert!(!raw.contains(r#"\"PakFile.SearchRecentlyFoundPaks"#), "{raw}");
     }
 
     #[test]

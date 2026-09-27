@@ -21,10 +21,13 @@ fn main() {
         println!("cargo:warning=resources/XAPOFX1_5.dll is missing -- the launcher will NOT install the no-Steam DLL. Build it with sp-listen-patch/build_sp_proxy.bat and copy it there before shipping.");
     }
     println!("cargo:rerun-if-changed=resources/SPClientFixes.dll");
-    if std::path::Path::new("resources/SPClientFixes.dll").is_file() {
+    println!("cargo:rerun-if-changed=resources/client-fixes/BravoHotelGame-ClientFixes_P.pak");
+    println!("cargo:rerun-if-changed=resources/client-fixes/BravoHotelGame-ClientFixes_P.sig");
+    if ["resources/SPClientFixes.dll", "resources/client-fixes/BravoHotelGame-ClientFixes_P.pak",
+        "resources/client-fixes/BravoHotelGame-ClientFixes_P.sig"].iter().all(|p| std::path::Path::new(p).is_file()) {
         println!("cargo:rustc-cfg=has_client_fixes");
     } else {
-        println!("cargo:warning=resources/SPClientFixes.dll is missing -- the optional Client fixes setting cannot be used until it is built.");
+        println!("cargo:warning=Client fixes resources are incomplete -- the optional setting requires the DLL, PAK and signature.");
     }
 
     #[cfg(target_os = "windows")]

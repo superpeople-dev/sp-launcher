@@ -33,7 +33,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build client-fixes/build --config Release --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir client-fixes/build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item -LiteralPath client-fixes/build/Release/SPClientFixes.dll -Destination src-tauri/resources/SPClientFixes.dll
+
+      - name: Check client fixes deployment lifecycle
+        shell: pwsh
+        run: |
+          cargo test --manifest-path tools/client-fixes-tests/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install frontend dependencies
         run: npm ci

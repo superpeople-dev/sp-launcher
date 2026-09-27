@@ -129,3 +129,16 @@ No license has been chosen yet. All rights reserved unless a `LICENSE` file
 says otherwise. The bundled fonts (Refrigerator Deluxe, `src/assets/fonts/`)
 are commercial fonts: check their license before making this repository
 public.
+
+The launcher always runs `PakFile.SearchRecentlyFoundPaks 0` at game startup so
+PAK lookups follow mount priority. Extra launch arguments follow the defaults.
+User `-ExecCmds` values are appended to the default command in one comma-separated
+startup command list; a saved copy of the same cache command is not duplicated.
+
+## Client fixes resources and lifecycle
+
+Client fixes bundles the DLL, translated PAK and signature together. Enabled launches deploy all three before starting the supported game build and remove them after exit. Disabled launches recover recognized leftovers and inject none of these resources. Steam integration remains independent.
+
+The launcher records deployed hashes outside the game folder and holds an exclusive session lock. It recovers completed files after an interrupted launcher session. Unknown or modified files are preserved and block launch; a file interrupted halfway through writing requires manual inspection. The exact artifacts from the successful preservation test are recognized for migration.
+
+Translations live entirely in the PAK. The DLL retains scoped signature verification and the validated ordered-lookup patch; translation functions, cache polling and temporary lookup diagnostics have been removed. Ordered lookup can scan more archives than the game's recent-archive shortcut. GitHub Actions checks the bundled signature and deployment lifecycle before building the executable.

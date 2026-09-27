@@ -37,7 +37,7 @@ pub struct Config {
     pub auto_update: bool,
     pub verify_before_launch: bool,
     pub debug_logging: bool,
-    /// Load the separate, optional in-process client fixes DLL at launch.
+    /// Deploy the optional client fixes DLL and signed translation PAK for this launch.
     pub client_fixes_enabled: bool,
     /// Show the client fixes DLL's diagnostic console when it is loaded.
     pub client_fixes_debug_window: bool,
@@ -93,7 +93,8 @@ pub fn config_path(base: &Path) -> PathBuf {
 fn strip_base_args(raw: &str) -> String {
     let kept: Vec<String> = super::game::parse_args(raw)
         .into_iter()
-        .filter(|tok| !super::game::BASE_ARGS.iter().any(|b| b.eq_ignore_ascii_case(tok)))
+        .filter(|tok| !super::game::BASE_ARGS.iter().any(|b| b.eq_ignore_ascii_case(tok))
+            && !tok.eq_ignore_ascii_case("-ExecCmds=\"PakFile.SearchRecentlyFoundPaks 0\""))
         .collect();
     kept.join(" ")
 }

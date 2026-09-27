@@ -22,7 +22,7 @@ interface Props {
 
 const TOGGLES: { key: keyof Config; name: string; hint: string }[] = [
   { key: "close_on_launch", name: "Minimize to tray on launch", hint: "Send the launcher to the tray once the game starts, instead of staying open" },
-  { key: "client_fixes_enabled", name: "Client fixes", hint: "Load the separate client fixes DLL when starting the game; takes effect on the next launch" },
+  { key: "client_fixes_enabled", name: "Client fixes", hint: "Apply client fixes" },
 ];
 
 export function SettingsPanel({

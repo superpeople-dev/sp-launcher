@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod client_fixes;
+mod client_fixes_deployment;
 mod discord;
 mod download;
 mod engine_ini;
@@ -322,14 +323,10 @@ async fn launch_game(
         env.push(("SP_AUTH_TICKET".into(), ticket.token));
     }
 
-    // `n.VerifyPeer=False` has to be in the player's Engine.ini before the
-    // client starts reading config. Done before the hosts redirect so that a
-    // failure here leaves the system completely untouched — there is nothing
-    // to roll back yet at this point.
-    // The no-Steam DLL, before anything starts the game: Windows holds a loaded
-    // DLL open, so this is the only moment it can be written. Placed before the
-    // hosts redirect for the same reason engine_ini is -- a failure here leaves
-    // the machine untouched.
+    // Prepare optional session-owned fixes before starting the game. Early
+    // failures roll deployment back through the session guard.
+    let mut fixes_session = client_fixes::prepare(&cfg.install_dir, &config_dir, cfg.client_fixes_enabled)?;
+
     match shim::apply(&cfg.install_dir) {
         Ok(shim::Applied::NotBundled) => {
             eprintln!("[shim] this launcher has no DLL bundled -- the game needs XAPOFX1_5.dll placed by hand");
@@ -342,13 +339,6 @@ async fn launch_game(
         Err(e) => return Err(e),
     }
 
-    // The optional fixes are a second DLL. Keep their installation and loading
-    // separate from the no-Steam proxy so the setting controls one launch.
-    let client_fixes_path = if cfg.client_fixes_enabled {
-        Some(client_fixes::apply(&cfg.install_dir)?)
-    } else {
-        None
-    };
     if cfg.client_fixes_enabled {
         // The DLL reads this inherited setting after injection. Supply an
         // explicit zero as well, so an ambient variable cannot open the
@@ -381,11 +371,15 @@ async fn launch_game(
         server: server.as_deref(),
         user_args: &cfg.launch_args,
         env: &env,
-    })
-?;
+    })?;
 
     let pid = child.id();
-    if let Some(path) = client_fixes_path {
+    if let Err(error) = fixes_session.mark_running(pid) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    if let Some(path) = fixes_session.dll_path() {
         if let Err(error) = client_fixes::inject(pid, &path) {
             if let Err(kill_error) = child.kill() {
                 return Err(LauncherError::Message(format!(
@@ -409,8 +403,8 @@ async fn launch_game(
         }
     }
 
-    // Wait for the game in the background and undo the redirect the moment it
-    // exits, so the hosts file is only modified while the game is actually up.
+    // Wait for the game, then remove only session-owned client fixes files.
+    // The permanent hosts redirect is unchanged.
     // This also fires when `stop_game` kills the process, so that command
     // doesn't need to duplicate any of this cleanup itself.
     {
@@ -420,6 +414,10 @@ async fn launch_game(
         let mut child = child;
         tauri::async_runtime::spawn_blocking(move || {
             let status = child.wait();
+            if let Err(error) = fixes_session.cleanup() {
+                eprintln!("[client fixes] cleanup failed: {error}");
+                let _ = app.emit("game:cleanup-failed", error.to_string());
+            }
             *running_pid.lock().expect("pid mutex") = None;
             presence.set(discord::State::InLauncher);
             let code = status.ok().and_then(|s| s.code());

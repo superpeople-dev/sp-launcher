@@ -3,7 +3,7 @@
 #[cfg(all(windows, not(target_pointer_width = "64")))]
 compile_error!("Client fixes injection requires the 64-bit launcher build");
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::{LauncherError, Result};
 
@@ -12,28 +12,26 @@ const DLL: &[u8] = include_bytes!("../resources/SPClientFixes.dll");
 #[cfg(not(has_client_fixes))]
 const DLL: &[u8] = &[];
 
-const REL_PATH: &[&str] = &["BravoHotelGame", "Binaries", "Win64", "SPClientFixes.dll"];
+#[cfg(has_client_fixes)]
+const PAK: &[u8] = include_bytes!("../resources/client-fixes/BravoHotelGame-ClientFixes_P.pak");
+#[cfg(has_client_fixes)]
+const SIG: &[u8] = include_bytes!("../resources/client-fixes/BravoHotelGame-ClientFixes_P.sig");
+#[cfg(not(has_client_fixes))]
+const PAK: &[u8] = &[];
+#[cfg(not(has_client_fixes))]
+const SIG: &[u8] = &[];
 
-pub fn target_path(install_dir: &Path) -> PathBuf {
-    REL_PATH.iter().fold(install_dir.to_path_buf(), |p, part| p.join(part))
-}
-
-/// Install only when enabled. A missing payload is an error, not a silent no-op.
-pub fn apply(install_dir: &str) -> Result<PathBuf> {
-    if DLL.is_empty() {
-        return Err(LauncherError::Message(
-            "Client fixes are enabled, but this launcher was built without SPClientFixes.dll".into(),
-        ));
+pub fn prepare(install_dir: &str, config: &Path, enabled: bool) -> Result<crate::client_fixes_deployment::Deployment> {
+    if install_dir.is_empty() { return Err(LauncherError::Message("no install directory set".into())); }
+    if enabled {
+        use sha2::{Digest, Sha256};
+        let executable = crate::game::launch_exe_path(Path::new(install_dir));
+        let digest = format!("{:x}", Sha256::digest(std::fs::read(executable)?));
+        if digest != "16b8b421371457d936e5cc1810ff707b5f5984126973dbdc4e6b5c714522051f" {
+            return Err(LauncherError::Message("Client fixes do not support this game build. Disable the option to launch without them.".into()));
+        }
     }
-    if install_dir.is_empty() {
-        return Err(LauncherError::Message("no install directory set".into()));
-    }
-    let path = target_path(Path::new(install_dir));
-    if std::fs::read(&path).ok().as_deref() != Some(DLL) {
-        std::fs::create_dir_all(path.parent().expect("DLL target has a parent"))?;
-        crate::shim::write_atomically(&path, DLL)?;
-    }
-    Ok(path)
+    crate::client_fixes_deployment::Deployment::prepare(Path::new(install_dir), config, enabled, [DLL, PAK, SIG])
 }
 
 /// The game is already running when this is called. Failure is fatal to launch;
@@ -221,16 +219,5 @@ mod windows {
             return Err(LauncherError::Message("Client fixes: the game did not load SPClientFixes.dll".into()));
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::target_path;
-    use std::path::Path;
-
-    #[test]
-    fn client_fixes_use_a_distinct_dll() {
-        assert_eq!(target_path(Path::new("C:/game")), Path::new("C:/game/BravoHotelGame/Binaries/Win64/SPClientFixes.dll"));
     }
 }

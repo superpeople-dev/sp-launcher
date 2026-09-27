@@ -139,6 +139,7 @@ export default function App() {
       }),
       listen<string>("hosts:recovered", (e) => setNotice(e.payload)),
       listen<string>("hosts:error", (e) => setError(e.payload)),
+      listen<string>("game:cleanup-failed", (e) => setError(`Client fixes cleanup failed: ${e.payload}`)),
     ];
     return () => {
       unlisten.forEach((p) => void p.then((off) => off()));

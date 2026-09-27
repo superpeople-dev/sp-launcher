@@ -49,3 +49,5 @@ https://www.7-zip.org/download.html, open it with 7-Zip, and copy
 fine, but keep a note of the version in the release notes.
 
 Not in version control for the same reason as the DLL.
+
+Client fixes additionally requires the committed PAK and signature in `client-fixes/`. All three resources are embedded together; incomplete resource sets disable the bundle. See `client-fixes/README.md` for hashes and rebuild notes.

@@ -140,13 +140,25 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(saved.join("WindowsClient").join("Engine.ini"))
 }
 
-/// Make sure `n.VerifyPeer=False` is in place, creating the file (and the
-/// folders above it) if the game has never been run. Returns the path it
-/// settled on, so callers can say where it went.
+/// Remove the temporary investigation setting, retaining unrelated config.
+fn without_temporary_pak_setting(content: &str) -> String {
+    let mut system_settings = false;
+    content.split_inclusive('\n').filter(|line| {
+        let trimmed = line.trim();
+        if is_section_header(trimmed) {
+            system_settings = trimmed.eq_ignore_ascii_case("[SystemSettings]");
+        }
+        !(system_settings && is_key_line(trimmed, "PakFile.SearchRecentlyFoundPaks")
+            && trimmed.split_once('=').map(|(_,v)| v.trim() == "0").unwrap_or(false))
+    }).collect()
+}
+
+/// Ensure the network setting is present and retire the temporary PAK setting.
 pub fn apply() -> Result<PathBuf> {
     let path = config_path()?;
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let updated = with_setting(&existing, SECTION, KEY, VALUE);
+    let cleaned = without_temporary_pak_setting(&existing);
+    let updated = with_setting(&cleaned, SECTION, KEY, VALUE);
 
     if updated != existing {
         if let Some(dir) = path.parent() {
@@ -160,6 +172,15 @@ pub fn apply() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removes_only_the_temporary_system_settings_value() {
+        let before = "[SystemSettings]\r\n;PakFile.SearchRecentlyFoundPaks=0\r\nPakFile.SearchRecentlyFoundPaks=0\r\nOther=7\r\n[Other]\r\nPakFile.SearchRecentlyFoundPaks=0\r\n";
+        let expected = "[SystemSettings]\r\n;PakFile.SearchRecentlyFoundPaks=0\r\nOther=7\r\n[Other]\r\nPakFile.SearchRecentlyFoundPaks=0\r\n";
+        assert_eq!(without_temporary_pak_setting(before), expected);
+        let intentional = "[SystemSettings]\nPakFile.SearchRecentlyFoundPaks=1\n";
+        assert_eq!(without_temporary_pak_setting(intentional), intentional);
+    }
 
     fn set(content: &str) -> String {
         with_setting(content, SECTION, KEY, VALUE)

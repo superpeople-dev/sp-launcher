@@ -46,6 +46,9 @@ if (-not (Test-Path $dll)) {
     exit 1
 }
 Write-Host "  DLL bundled: $((Get-Item $dll).Length) bytes" -ForegroundColor Green
+foreach ($fixResource in @('src-tauri\resources\client-fixes\BravoHotelGame-ClientFixes_P.pak', 'src-tauri\resources\client-fixes\BravoHotelGame-ClientFixes_P.sig')) {
+    if (-not (Test-Path -LiteralPath $fixResource)) { throw "Missing bundled Client fixes resource: $fixResource" }
+}
 $clientFixesDll = 'src-tauri\resources\SPClientFixes.dll'
 if (-not (Test-Path $clientFixesDll)) {
     Write-Host ''
