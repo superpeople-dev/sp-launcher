@@ -48,3 +48,6 @@ manifest.json
 # Signed client-fixes payload is deliberately versioned.
 !src-tauri/resources/client-fixes/BravoHotelGame-ClientFixes_P.sig
 tools/client-fixes-tests/target/
+
+
+!src-tauri/resources/client-fixes/BravoHotelGame-ClientFixes_P.pak

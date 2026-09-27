@@ -26,6 +26,9 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Verify bundled ClientFixes resources
+        run: node tools/verify-clientfixes-resources.mjs
+
       - name: Build client fixes DLL
         shell: pwsh
         run: |

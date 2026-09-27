@@ -1,0 +1,14 @@
+{
+  "export_count": 18500,
+  "changed_presentation_exports": 6,
+  "unchanged_exports_byte_verified": 18494,
+  "unchanged_blueprint_functions": 65,
+  "all_export_classes_names_and_dependencies_unchanged": true,
+  "native_progress_width_and_container_match": true,
+  "health_text_uses_dynamic_center_anchors": true,
+  "viewport_scale_cases_verified": 12,
+  "ammo_weapon_and_health_edges_match": true,
+  "stance_switcher_visible_with_existing_four_state_mapping": true,
+  "equipment_relative_geometry_unchanged": true,
+  "runtime_tested": false
+}

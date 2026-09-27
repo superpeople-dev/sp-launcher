@@ -1,0 +1,21 @@
+{
+  "compression": "Oodle Kraken",
+  "level": "Normal (4)",
+  "block_bytes": 65536,
+  "excluded_files": [],
+  "payload_files": 6,
+  "compressed_files": 6,
+  "raw_files": 0,
+  "verified_blocks": 175,
+  "original_bytes": 11168715,
+  "compressed_bytes": 434883,
+  "saved_bytes": 10733832,
+  "reduction_percent": 96.11,
+  "elapsed_seconds": 0.49,
+  "pak_sha256": "7675e9f4ef743826b66ede30d0e9c4fabe2bfb1c9608e092269414c45d2aeacf",
+  "all_payloads_roundtrip_verified": true,
+  "indexes_and_compact_entries_verified": true,
+  "runtime_tested": false,
+  "deployed": false,
+  "sig_sha256": "f212b2e564f812c3c4bf2039f3bb33afd19770e35c621827068affe5567b4c18"
+}

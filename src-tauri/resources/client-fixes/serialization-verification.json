@@ -1,0 +1,45 @@
+{
+  "native_widget_property_checks": [
+    {
+      "export": 2082,
+      "bytes": 554,
+      "exact_boundary": true,
+      "property_schema_preserved": true
+    },
+    {
+      "export": 2084,
+      "bytes": 528,
+      "exact_boundary": true,
+      "property_schema_preserved": true
+    },
+    {
+      "export": 2130,
+      "bytes": 583,
+      "exact_boundary": true,
+      "property_schema_preserved": true
+    },
+    {
+      "export": 13673,
+      "bytes": 218,
+      "exact_boundary": true,
+      "property_schema_preserved": true
+    },
+    {
+      "export": 17179,
+      "bytes": 528,
+      "exact_boundary": true,
+      "property_schema_preserved": true
+    },
+    {
+      "export": 17494,
+      "bytes": 275,
+      "exact_boundary": true,
+      "property_schema_preserved": true
+    }
+  ],
+  "stance_visibility_type": "EnumProperty",
+  "stance_serial_bytes": 275,
+  "source_stance_serial_bytes": 275,
+  "previous_malformed_stance_rejected": true,
+  "runtime_tested": false
+}

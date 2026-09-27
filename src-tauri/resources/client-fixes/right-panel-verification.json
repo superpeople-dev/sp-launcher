@@ -1,0 +1,14 @@
+{
+  "export_count": 18500,
+  "changed_presentation_exports": 28,
+  "unchanged_exports_byte_verified": 18472,
+  "unchanged_blueprint_functions": 65,
+  "left_panel_preserved": true,
+  "main_widget_pair_byte_identical": true,
+  "parent_content_backlinks_verified": true,
+  "moved_slot_load_dependencies_verified": true,
+  "public_weapon_damage_and_ammo_geometry_verified": true,
+  "left_and_right_frame_heights_match": true,
+  "public_health_font_sizes_and_center_alignment_verified": true,
+  "runtime_tested": false
+}

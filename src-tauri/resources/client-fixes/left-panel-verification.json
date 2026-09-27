@@ -1,0 +1,15 @@
+{
+  "export_count": 18500,
+  "unchanged_exports_byte_verified": 18485,
+  "unchanged_blueprint_functions": 65,
+  "reparented_canvas_slots": {
+    "11698": 2591,
+    "11699": 7683,
+    "11700": 16081
+  },
+  "parent_content_backlinks_verified": true,
+  "load_dependencies_verified": true,
+  "public_equipment_and_boost_positions_verified": true,
+  "centred_health_geometry_preserved": true,
+  "runtime_tested": false
+}

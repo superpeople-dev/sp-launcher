@@ -1,0 +1,138 @@
+[
+  {
+    "package": "UW-MainWidget",
+    "export": 783,
+    "object": "CanvasPanelSlot_14",
+    "property": "Left",
+    "before": [
+      -30.0
+    ],
+    "after": [
+      -260
+    ]
+  },
+  {
+    "package": "UW-MainWidget",
+    "export": 783,
+    "object": "CanvasPanelSlot_14",
+    "property": "Top",
+    "before": [
+      -200.0
+    ],
+    "after": [
+      -30
+    ]
+  },
+  {
+    "package": "UW-TopInfoWidget",
+    "export": 873,
+    "object": "CanvasPanelSlot_1",
+    "property": "Left",
+    "before": [
+      -312.56231689453125
+    ],
+    "after": [
+      -38
+    ]
+  },
+  {
+    "package": "UW-TopInfoWidget",
+    "export": 886,
+    "object": "CanvasPanelSlot_6",
+    "property": "Left",
+    "before": [
+      -500.0
+    ],
+    "after": [
+      -260.65717
+    ]
+  },
+  {
+    "package": "UW-TopInfoWidget",
+    "export": 887,
+    "object": "CanvasPanelSlot_7",
+    "property": "Left",
+    "before": [
+      -540.0
+    ],
+    "after": [
+      -265
+    ]
+  },
+  {
+    "package": "UW-TopInfoWidget",
+    "export": 887,
+    "object": "CanvasPanelSlot_7",
+    "property": "Top",
+    "before": [
+      -100.0
+    ],
+    "after": [
+      -235
+    ]
+  },
+  {
+    "package": "UW-TopInfoWidget",
+    "export": 2082,
+    "object": "CanvasPanelSlot_1",
+    "property": "Left",
+    "before": [
+      -30.0
+    ],
+    "after": [
+      329
+    ]
+  },
+  {
+    "package": "UW-TopInfoWidget",
+    "export": 2082,
+    "object": "CanvasPanelSlot_1",
+    "property": "Minimum",
+    "before": [
+      1.0,
+      1.0
+    ],
+    "after": [
+      0.5,
+      1
+    ]
+  },
+  {
+    "package": "UW-TopInfoWidget",
+    "export": 2082,
+    "object": "CanvasPanelSlot_1",
+    "property": "Maximum",
+    "before": [
+      1.0,
+      1.0
+    ],
+    "after": [
+      0.5,
+      1
+    ]
+  },
+  {
+    "package": "UW-TopInfoWidget",
+    "export": 13673,
+    "object": "SizeBox_Main",
+    "property": "WidthOverride",
+    "before": [
+      300.0
+    ],
+    "after": [
+      340
+    ]
+  },
+  {
+    "package": "UW-TopInfoWidget",
+    "export": 13673,
+    "object": "SizeBox_Main",
+    "property": "HeightOverride",
+    "before": [
+      25.0
+    ],
+    "after": [
+      18
+    ]
+  }
+]

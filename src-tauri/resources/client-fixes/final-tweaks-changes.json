@@ -1,0 +1,33 @@
+{
+  "changed_exports": [
+    2082,
+    2084,
+    2130,
+    13673,
+    17179,
+    17494
+  ],
+  "native_health_max_width": 300,
+  "native_health_slot_width": 30,
+  "previous_container_width": 340,
+  "health_text_anchors": [
+    0.5,
+    0.5
+  ],
+  "health_text_offset": [
+    0,
+    0.5
+  ],
+  "ammo_and_weapon_shift_left_units": 20,
+  "stance_switcher": 17494,
+  "stance_visibility": "HitTestInvisible",
+  "stance_scale": [
+    0.7,
+    0.7
+  ],
+  "stance_update_logic_unchanged": true,
+  "equipment_spacing_unchanged": true,
+  "header_growth": 0,
+  "serialized_growth": 0,
+  "runtime_tested": false
+}
