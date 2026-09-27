@@ -69,7 +69,9 @@ impl Default for Config {
             auto_update: true,
             verify_before_launch: false,
             debug_logging: false,
-            client_fixes_enabled: false,
+            // On by default (0.3.2): the fixes are hash-gated to build 1.3.0.473797
+            // and fail closed on any other EXE. Players can still switch it off.
+            client_fixes_enabled: true,
             client_fixes_debug_window: false,
             auth_key_sealed: String::new(),
             device_id: String::new(),

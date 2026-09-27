@@ -1,6 +1,8 @@
 # Client fixes DLL
 
-Optional fixes for the supported Super People preservation build. The launcher checks the executable SHA256 before enabling fixes and deploys the DLL with the bundled PAK/signature for one game session.
+**Apply client fixes** is enabled by default for the supported Super People preservation build. The launcher checks the executable SHA256 before enabling fixes and deploys the DLL with the bundled PAK/signature for one game session. Players can disable the option in Settings.
+
+The client fixes debug window is off by default and can be enabled separately for the next launch. Diagnostics also go to an attached debugger when the window is hidden.
 
 The DLL contains the First Blood audio reference fix, White/Gold capsule ID correction, local class-selection level adjustment and custom PAK support. The class adjustment's pre-match scope remains under investigation in the parent code folder's TODO.md. Its original level is retained for restoration.
 

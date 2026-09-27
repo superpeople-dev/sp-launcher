@@ -31,7 +31,7 @@ Rust backend. Windows only.
 - **No-Steam fix.** Before each launch the embedded `XAPOFX1_5.dll` proxy is
   written into the game's `Win64` folder, so the client does not wait for Steam
   (`src-tauri/src/shim.rs`, `src-tauri/resources/README.md`).
-- **Optional client fixes.** A separate `SPClientFixes.dll` is loaded only when
+- **Client fixes (on by default).** A separate `SPClientFixes.dll` is loaded only when
   enabled in Settings. Its source is in `client-fixes/src/`, and the fixes
   are listed in [`client-fixes/`](client-fixes/README.md). Its debug window is
   off by default and can be enabled separately in Settings. It currently includes:
