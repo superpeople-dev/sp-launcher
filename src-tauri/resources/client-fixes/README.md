@@ -37,4 +37,4 @@ Enable Apply client fixes to deploy the signed pair for the game session.
 The prior left/right layout was confirmed in game. These final adjustments
 still need verification with changing health and standing/crouching/prone.
 Offline checks establish geometry and serialization, not runtime stance updates.
-The main branch retains the original translation-only bundle.
+The main branch includes this HUD bundle alongside the cheat-menu translations.
