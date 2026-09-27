@@ -25,6 +25,7 @@ std::wstring expectedPath;
 BCRYPT_ALG_HANDLE rsaAlgorithm = nullptr;
 BCRYPT_KEY_HANDLE publicKey = nullptr;
 std::atomic<HANDLE> lockedPak{INVALID_HANDLE_VALUE};
+std::atomic<bool> signatureAnnounced{false};
 
 bool ReadBytes(std::uintptr_t address, void* output, std::size_t size) {
     SIZE_T read=0;
@@ -118,6 +119,8 @@ bool Hook(void* table, void* originalKey, const Array* name) {
         if (!CustomName(name)) return original(table,originalKey,name);
         const bool accepted=ValidateCustom(table);
         if (!accepted) Log(L"ClientFixes PAK: signature rejected.\r\n");
+        else if (!signatureAnnounced.exchange(true))
+            Log(L"ClientFixes PAK: custom signature verified.\r\n");
         return accepted;
     } catch (...) {
         Log(L"ClientFixes PAK: verification failed; refusing archive.\r\n");
@@ -272,6 +275,7 @@ bool Install(std::uintptr_t base, Logger logger) {
         Log(L"ClientFixes PAK: could not enable ordered asset lookup.\r\n");
         return false;
     }
+    Log(L"ClientFixes PAK: scoped signature verification and ordered asset lookup ready.\r\n");
     return true;
 }
 } // namespace clientfixes_signing

@@ -523,6 +523,8 @@ bool ApplyCapsulePatch(std::uintptr_t base, const CapsuleRows& rows,
 DWORD WINAPI RunCapsules(LPVOID imageBase) {
     const auto base=reinterpret_cast<std::uintptr_t>(imageBase);
     CapsulePatch patch{};
+    bool announced=false;
+    Log(L"Capsule fix: waiting for the item table.\r\n");
     for (;;) {
         if (patch.rows.table) {
             if (!RowsStillMapped(patch.rows)) {
@@ -546,7 +548,10 @@ DWORD WINAPI RunCapsules(LPVOID imageBase) {
         }
         if (!patch.rows.table) {
             const CapsuleRows rows=FindCapsuleRows(base);
-            if (rows.table) ApplyCapsulePatch(base,rows,patch);
+            if (rows.table && ApplyCapsulePatch(base,rows,patch) && !announced) {
+                Log(L"Capsule fix: White and Gold buff IDs corrected.\r\n");
+                announced=true;
+            }
         }
         Sleep(patch.rows.table ? 1000 : 5000);
     }
@@ -663,10 +668,12 @@ DWORD WINAPI RunFirstBlood(LPVOID imageBase) {
     std::uintptr_t widget=0,lastSound=0;
     ULONGLONG missingSince=0;
     bool gated=false;
+    Log(L"First Blood fix: waiting for the perk audio assets.\r\n");
     for (;;) {
         if (!graph.reference) {
             graph=FindFirstBloodGraph(base);
             if (!graph.reference) { Sleep(2000); continue; }
+            Log(L"First Blood fix: ready; first-kill audio is limited to once per match.\r\n");
         }
         const auto controller=gLocalController.load(std::memory_order_acquire);
         const auto currentWidget=PerkWidget(controller,graph.widgetClass);
@@ -676,6 +683,7 @@ DWORD WINAPI RunFirstBlood(LPVOID imageBase) {
             if (gated && now-missingSince>=2000) {
                 if (ArmFirstSound(graph)) {
                     gated=false;
+                    Log(L"First Blood fix: audio rearmed for the next match.\r\n");
                 }
             }
             // Retain the old widget during a brief visibility gap. If a new
@@ -691,6 +699,7 @@ DWORD WINAPI RunFirstBlood(LPVOID imageBase) {
                 if (gated) {
                     if (!ArmFirstSound(graph)) { Sleep(25); continue; }
                     gated=false;
+                    Log(L"First Blood fix: audio rearmed for the new match.\r\n");
                 }
                 widget=currentWidget;
                 lastSound=0;
@@ -700,6 +709,7 @@ DWORD WINAPI RunFirstBlood(LPVOID imageBase) {
                 if (sound==graph.firstSound && sound!=lastSound && !gated) {
                     if (ReplaceScriptReference(graph.reference,graph.firstSound,0)) {
                         gated=true;
+                        Log(L"First Blood fix: first cue detected; subsequent first-kill cues muted.\r\n");
                     }
                 }
                 lastSound=sound;
@@ -739,6 +749,8 @@ DWORD WINAPI Run(LPVOID) {
     LocalPlayer active{};
     LONG original=-1;
     DWORD nextScan=0;
+    bool classAnnounced=false;
+    Log(L"Class selection: waiting for a standalone local player.\r\n");
     for (;;) {
         LocalPlayer current{};
         if (active.controller && Validate(active.controller, current) &&
@@ -764,9 +776,17 @@ DWORD WINAPI Run(LPVOID) {
             // The live class-selection experiment established that level 5
             // satisfies every current class tile. A legitimate higher level
             // is never lowered, and the original low value is kept for exit.
-            if (Read(current.info+632, level) && level >= 0 && level < kClassLevel &&
+            const bool levelRead=Read(current.info+632, level);
+            if (levelRead && level >= 0 && level < kClassLevel &&
                 CompareDword(current.info+632, level, kClassLevel)) {
                 if (original<0) original=level;
+                if (!classAnnounced) {
+                    Log(L"Class selection: local level set to 5; class tiles are available.\r\n");
+                    classAnnounced=true;
+                }
+            } else if (levelRead && level>=kClassLevel && !classAnnounced) {
+                Log(L"Class selection: local level already meets the class requirements.\r\n");
+                classAnnounced=true;
             }
         } else {
             gLocalController.store(0,std::memory_order_release);
@@ -778,7 +798,7 @@ DWORD WINAPI Run(LPVOID) {
 
 // Exported version marker for identifying which DLL was embedded. This number
 // advances when a fix is added; the launcher does not currently branch on it.
-extern "C" __declspec(dllexport) unsigned int SPClientFixesVersion() { return 11; }
+extern "C" __declspec(dllexport) unsigned int SPClientFixesVersion() { return 12; }
 
 // DllMain runs under the Windows loader lock. Only disable thread callbacks
 // and start the bootstrap worker here; do not hash files, scan UObjects, wait
