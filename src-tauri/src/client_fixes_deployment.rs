@@ -8,9 +8,11 @@ pub const DLL_PATH: &str = "BravoHotelGame/Binaries/Win64/SPClientFixes.dll";
 pub const PAK_PATH: &str = "BravoHotelGame/Content/Paks/BravoHotelGame-ClientFixes_P.pak";
 pub const SIG_PATH: &str = "BravoHotelGame/Content/Paks/BravoHotelGame-ClientFixes_P.sig";
 const PATHS: [&str; 3] = [DLL_PATH, PAK_PATH, SIG_PATH];
-// Exact artifacts deployed during the completed preservation experiment.
-const LEGACY: [(&str, &str); 3] = [
+// Exact artifacts deployed during the completed preservation experiment,
+// plus the SPClientFixes.dll that launcher 0.3.2 wrote on every launch.
+const LEGACY: [(&str, &str); 4] = [
     (DLL_PATH, "b69b6b32eb14562f428c38fbc7b70df9d4ade39703b21f3b27b95815544b9f97"),
+    (DLL_PATH, "72e7940bdcc78e6a5fb4b99012ad1500280a08b4b90b56d29cf83e13a35ee95a"),
     (PAK_PATH, "002174c2509a48a3bcb7beb56dbae35aae6db00fd48eb402e9d0543e1a38c506"),
     (SIG_PATH, "4a3a1c4a79b06aebd5f42678603f9fa9d52b66c2c5ae7d50816ae7e5027103e0"),
 ];
