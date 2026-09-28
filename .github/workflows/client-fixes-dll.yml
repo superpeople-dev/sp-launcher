@@ -1,0 +1,28 @@
+name: Build ClientFixes DLL
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build SPClientFixes.dll
+        shell: pwsh
+        run: |
+          cmake -S client-fixes -B client-fixes/build -A x64 -DBUILD_TESTING=OFF
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build client-fixes/build --config Release --target SPClientFixes --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sp-client-fixes-windows-x64
+          path: client-fixes/build/Release/SPClientFixes.dll
+          if-no-files-found: error
