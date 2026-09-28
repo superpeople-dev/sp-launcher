@@ -1,7 +1,8 @@
 # Current-build HUD adaptation
 
 Contains current 1.3.0.473797 UW-MainWidget and UW-TopInfoWidget package pairs,
-plus the English CheatTable pair. No older Blueprint assets are bundled.
+the localized BP-CheatWidget, and the community menu fixes. The cheat widget
+uses an English CheatTable DataTable override for its command descriptions.
 
 The health container matches the current progress widget's native 300-unit
 maximum width and 30-unit slot size. Health numbers use centre anchors instead
@@ -16,16 +17,13 @@ icon/name/grade grouping. Ammo and weapon panels sit 20 units further left to
 meet the actual health-bar edge. The public ammo dimensions and fire mode,
 loaded rounds and reserve ordering remain unchanged.
 
-All 18,500 TopInfo exports parse. This final pass changes six presentation
+All 18,500 TopInfo exports parse. The final pass changes six presentation
 exports; the other 18,494 exports, including all 65 Blueprint functions, are
 byte-for-byte unchanged from the accepted right-side build. MainWidget is also
 byte-identical. No class, object-name or preload-dependency changes are made.
-final-tweaks-changes.json and final-tweaks-verification.json record this pass.
-serialization-verification.json additionally checks exact native widget property
-boundaries and preserves the source property schema. Stance Visibility must use
-EnumProperty; a ByteProperty substitution leaves trailing data and causes the
-game to reject the package. The strict check rejects that malformed candidate.
-Earlier reports describe their respective historical candidates.
+Serialization checks preserve the source property schema. Stance Visibility
+must use EnumProperty; a ByteProperty substitution leaves trailing data and
+causes the game to reject the package.
 
 The signed PAK is 434,883 bytes, Oodle Kraken, Normal, 64 KiB blocks. All six
 payloads, compression blocks and encrypted indices pass read-back verification.
