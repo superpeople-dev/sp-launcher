@@ -69,6 +69,8 @@ The optional debug window is off by default. The no-Steam proxy is separate.
 - Adds the lower-right **BOT GAME** button to the lobby with the caption
   "50 Bots - Random Blue Zone". Its click calls the game's standalone match
   entry point; the DLL supplies the bot-match settings above.
+- Replaces the 200 bot nicknames in `TBL-AICharacterSettingData` with the
+  tested callsign set for local bot matches.
 - Adds localized `Game.locres` catalogs and overrides across 20
   cultures, including English cheat-command descriptions and other menu text.
 - Patches cooked UI assets for HUD health, stance, ammo and weapon layout, 

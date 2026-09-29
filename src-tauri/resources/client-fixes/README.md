@@ -25,12 +25,13 @@ Serialization checks preserve the source property schema. Stance Visibility
 must use EnumProperty; a ByteProperty substitution leaves trailing data and
 causes the game to reject the package.
 
-The signed PAK contains the 81 base payloads and a cooked
-`BP-LobbyWidget_Web` pair for the standalone Bot Game button. The button is
+The signed PAK contains the 81 base payloads, a cooked
+`BP-LobbyWidget_Web` pair for the standalone Bot Game button, and a
+`TBL-AICharacterSettingData` pair with 200 new bot names. The button is
 anchored at the lower right and displays "50 Bots - Random Blue Zone" beneath
 its title. The user confirmed the final layout and red style in the lobby.
 The button's click path calls `StartStandalonePlay` on the login game mode.
-`payload-report.json` records the 83-file archive and matching PAK/signature
+`payload-report.json` records the 85-file archive and matching PAK/signature
 hashes; the private signing key is not packaged.
 
 Enable Apply client fixes to deploy the signed pair for the game session.
