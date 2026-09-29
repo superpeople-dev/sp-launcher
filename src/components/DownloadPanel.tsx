@@ -21,6 +21,8 @@ interface Props {
   onError: (message: string) => void;
   /** Called once the game is unpacked and the install folder was set. */
   onInstalled: () => void;
+  /** Called once Uninstall deleted the game. */
+  onUninstalled: () => void;
 }
 
 const STEP_LABEL: Record<DownloadStatus["phase"], string> = {
@@ -52,9 +54,10 @@ function duration(secs: number | null): string {
   return `${h} h ${m % 60} min left`;
 }
 
-export function DownloadPanel({ installed, installDir, onFolder, onError, onInstalled }: Props) {
+export function DownloadPanel({ installed, installDir, onFolder, onError, onInstalled, onUninstalled }: Props) {
   const [st, setSt] = useState<DownloadStatus | null>(null);
   const [dir, setDir] = useState("");
+  const [removing, setRemoving] = useState(false);
   const [lastActive, setLastActive] = useState<DownloadStatus["phase"]>("idle");
 
   useEffect(() => {
@@ -118,12 +121,31 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
     void invoke("download_cancel").catch((e) => onError(String(e)));
   };
   // Picking a folder here changes the Game folder itself. If the game is
-  // already in it, the launcher is ready and nothing needs downloading.
+  // already in it, the launcher is ready and nothing needs downloading. The
+  // picker opens in the current Game folder, where the game is.
   const browse = async () => {
-    const picked = await pickInstallFolder();
+    const picked = await pickInstallFolder(dir.trim() || installDir);
     if (picked) {
       setDir(picked);
       onFolder(picked);
+    }
+  };
+  // Deletes the game's own files from the Game folder (see uninstall() in
+  // download.rs); the folder setting stays, so Download puts it back there.
+  const uninstall = async () => {
+    const sure = await ask(
+      `Delete SUPER PEOPLE from ${installDir}?\n\nTo play again you will have to download the game again (27.7 GB). Other files in that folder are kept.`,
+      { title: "Uninstall the game", kind: "warning", okLabel: "Uninstall", cancelLabel: "Keep it" },
+    );
+    if (!sure) return;
+    setRemoving(true);
+    try {
+      await invoke("uninstall_game");
+      onUninstalled();
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -155,12 +177,12 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
             <input
               className="input"
               value={dir}
-              disabled={active || resumable}
+              disabled={active || resumable || removing}
               onChange={(e) => setDir(e.target.value)}
               onBlur={() => dir.trim() && dir.trim() !== installDir && onFolder(dir.trim())}
               spellCheck={false}
             />
-            <button className="btn" type="button" disabled={active || resumable} onClick={() => void browse()}>
+            <button className="btn" type="button" disabled={active || resumable || removing} onClick={() => void browse()}>
               Browse
             </button>
           </div>
@@ -220,7 +242,11 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
             <button className="btn btn--primary" type="button" onClick={start}>
               Continue
             </button>
-          ) : ready || st.phase === "done" ? null : (
+          ) : ready ? (
+            <button className="btn" type="button" disabled={removing} onClick={() => void uninstall()}>
+              {removing ? "Uninstalling…" : "Uninstall"}
+            </button>
+          ) : st.phase === "done" ? null : (
             <button className="btn btn--primary" type="button" disabled={!dir.trim()} onClick={start}>
               {st.phase === "failed" ? "Try again" : "Download"}
             </button>

@@ -207,6 +207,12 @@ export default function App() {
     setNotice("The game is installed and ready to play.");
   }, []);
 
+  // Uninstall deleted the game; the Game folder setting is unchanged.
+  const onUninstalled = useCallback(() => {
+    void invoke<InstallState>("install_state").then(setInstall);
+    setNotice("The game was uninstalled.");
+  }, []);
+
   // One button, no address. Joining a specific listen server by ip:port used to
   // be asked here; the lobby queue does that now, so the prompt was two extra
   // decisions on the way to playing. The backend side is untouched --
@@ -325,6 +331,7 @@ export default function App() {
             onFolder={(install_dir) => patchConfig({ install_dir })}
             onError={setError}
             onInstalled={onInstalled}
+            onUninstalled={onUninstalled}
           />
         )}
 

@@ -201,7 +201,7 @@ fn process_alive(pid: u32) -> Result<bool> {
 #[cfg(not(windows))]
 fn process_alive(_pid: u32) -> Result<bool> { Ok(false) }
 #[cfg(windows)]
-fn ensure_no_game_running() -> Result<()> {
+pub(crate) fn ensure_no_game_running() -> Result<()> {
     use windows_sys::Win32::{Foundation::{CloseHandle, INVALID_HANDLE_VALUE}, System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS}};
     unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -223,7 +223,7 @@ fn ensure_no_game_running() -> Result<()> {
     Ok(())
 }
 #[cfg(not(windows))]
-fn ensure_no_game_running() -> Result<()> { Ok(()) }
+pub(crate) fn ensure_no_game_running() -> Result<()> { Ok(()) }
 
 #[cfg(test)]
 mod tests {
