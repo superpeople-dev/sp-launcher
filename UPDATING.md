@@ -172,7 +172,7 @@ the installer automatically instead of just building it. The current key
 
 ```powershell
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content "$env:USERPROFILE\.tauri\sp-launcher-2.key" -Raw
-npm run tauri build
+bun run tauri build
 ```
 
 This produces, in `src-tauri\target\release\bundle\nsis\`:

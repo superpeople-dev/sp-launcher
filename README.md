@@ -94,14 +94,14 @@ from launch arguments because the DLL handles ordered lookup; other
 ## Building
 
 Prerequisites: [Rust](https://rustup.rs), Visual Studio Build Tools with the
-"Desktop development with C++" workload, and [Node.js](https://nodejs.org).
+"Desktop development with C++" workload, [Bun](https://bun.sh) and [Node.js](https://nodejs.org).
 
 ```powershell
 git clone <this-repo-url>
 cd sp-launcher
-npm install
-npm run tauri dev      # development, hot reload
-npm run tauri build    # NSIS installer in src-tauri/target/release/bundle/nsis/
+bun install
+bun run tauri dev      # development, hot reload
+bun run tauri build    # NSIS installer in src-tauri/target/release/bundle/nsis/
 ```
 
 Three binaries can be embedded at build time and are **not** in the repo. See
