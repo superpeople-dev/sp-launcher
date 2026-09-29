@@ -7,15 +7,15 @@
   "compressed_files": 85,
   "raw_files": 0,
   "verified_blocks": 1702,
-  "original_bytes": 107851638,
-  "compressed_bytes": 12077546,
-  "saved_bytes": 95774092,
+  "original_bytes": 107851926,
+  "compressed_bytes": 12077450,
+  "saved_bytes": 95774476,
   "reduction_percent": 88.8,
-  "elapsed_seconds": 5.28,
-  "pak_sha256": "0d2c241263f69cd9bff9387563921973f1e09fc7ccd79ebd700f8aeee3ccc3db",
+  "elapsed_seconds": 5.11,
+  "pak_sha256": "d16e31000fe1f198e88d3dac9425ff2db9a47940b72f603f6c69ebbe67390758",
   "all_payloads_roundtrip_verified": true,
   "indexes_and_compact_entries_verified": true,
   "runtime_tested": true,
   "deployed": false,
-  "sig_sha256": "56395589f545761ce6a10ff76520b87ed90bcc0ad0a4d6c597dcca7329ea2de6"
+  "sig_sha256": "8a4b05726ed37b408a8622d6fdda9a7520bec439978fa8b4bf1d95a8b0754e64"
 }
