@@ -2,6 +2,7 @@
 #include <bcrypt.h>
 
 #include "custom_pak_signing.hpp"
+#include "standalone_options.hpp"
 
 #include <array>
 #include <atomic>
@@ -37,14 +38,25 @@ constexpr std::uintptr_t kWideNameDecoderRva = 0x2a6a710;
 // Run() publishes only controllers that pass Validate(). The First Blood
 // worker reads this pointer but still checks the widget's class before use.
 std::atomic<std::uintptr_t> gLocalController{0};
+// Incremented whenever a different local controller/world/player info is adopted.
+std::atomic<std::uint32_t> gMatchEpoch{0};
 
 // Write diagnostics to the optional DLL console and a debugger, if attached.
 void Log(const wchar_t* message) {
-    OutputDebugStringW(message);
+    // Prefix local time (HH:MM:SS.mmm). A stack buffer keeps this safe on any
+    // thread; longer messages are truncated rather than allocating.
+    SYSTEMTIME time{};
+    GetLocalTime(&time);
+    wchar_t line[512];
+    const int prefix=swprintf_s(line,L"[%02u:%02u:%02u.%03u] ",time.wHour,time.wMinute,
+                                time.wSecond,time.wMilliseconds);
+    if (prefix<0) return;
+    wcsncpy_s(line+prefix,_countof(line)-prefix,message,_TRUNCATE);
+    OutputDebugStringW(line);
     HANDLE handle = GetStdHandle(STD_OUTPUT_HANDLE);
     if (handle && handle != INVALID_HANDLE_VALUE) {
         DWORD written = 0;
-        WriteConsoleW(handle, message, static_cast<DWORD>(wcslen(message)), &written, nullptr);
+        WriteConsoleW(handle, line, static_cast<DWORD>(wcslen(line)), &written, nullptr);
     }
 }
 
@@ -561,6 +573,7 @@ struct FirstBloodGraph {
     std::uintptr_t widgetClass=0;
     std::uintptr_t reference=0;
     std::uintptr_t firstSound=0;
+    std::uintptr_t bonusSound=0;
 };
 
 // Find UW-Inventory_Perk_C.ExecuteUbergraph_UW-Inventory_Perk among loaded
@@ -607,7 +620,7 @@ FirstBloodGraph FindFirstBloodGraph(std::uintptr_t base) {
                 !Read(script+0x1c9f,bonus) || !bonus || first==bonus ||
                 !ObjectNamed(base,first,"AK_UI_FirstKill") ||
                 !ObjectNamed(base,bonus,"AK_UI_KillBonus")) continue;
-            return {outer,script+0x1b47,first};
+            return {outer,script+0x1b47,first,bonus};
         }
     }
     return {};
@@ -655,68 +668,80 @@ bool ArmFirstSound(const FirstBloodGraph& graph) {
                                                   graph.firstSound)));
 }
 
-// Mirror Preservation/tools/first_blood_memory_gate.py. The selected sound at
-// perk widget +0x8E8 changes to AK_UI_FirstKill for a bot's personal first
-// kill. On the first observed selection, clear only that script reference;
-// this silences later requests without changing perk counts or using Kill Bonus.
-// A new widget, or two seconds without one, arms the reference for the next
-// match. Polling every 25 ms preserves the verified workaround but can miss
-// exceptionally close events; an event hook would remove that timing limit.
+// Mirror Preservation/tools/first_blood_memory_gate.py, with a match-wide gate.
+// The perk widget's selected sound (+0x8E8) becomes AK_UI_FirstKill for any
+// player's or bot's personal first kill (KillCount==1), so this is not a
+// match-wide cue. Once a First Kill selection is seen, or a Kill Bonus
+// selection proves an earlier kill already happened, clear only the script
+// reference so no later request can select the cue. Kill counts and perk
+// progression are untouched and no replacement cue is played.
+//
+// The gate is reset only when Run() adopts a different local controller/world/
+// player-info (gMatchEpoch). Perk widget identity changes and gaps in the
+// widget chain (death, spectating, HUD rebuilds) occur inside one match and
+// deliberately do NOT rearm; earlier versions rearmed on those and repeated
+// the cue. Polling every 5 ms narrows, but cannot eliminate, the window in
+// which two selections fall between reads; an audio-request hook would.
 DWORD WINAPI RunFirstBlood(LPVOID imageBase) {
     const auto base=reinterpret_cast<std::uintptr_t>(imageBase);
     FirstBloodGraph graph{};
     std::uintptr_t widget=0,lastSound=0;
-    ULONGLONG missingSince=0;
+    std::uint32_t epoch=0;
     bool gated=false;
     Log(L"First Blood fix: waiting for the perk audio assets.\r\n");
     for (;;) {
         if (!graph.reference) {
             graph=FindFirstBloodGraph(base);
             if (!graph.reference) { Sleep(2000); continue; }
+            epoch=gMatchEpoch.load(std::memory_order_acquire);
             Log(L"First Blood fix: ready; first-kill audio is limited to once per match.\r\n");
         }
+        const auto current=gMatchEpoch.load(std::memory_order_acquire);
+        if (current!=epoch) {
+            // Verified new match boundary: new local controller/world/info.
+            if (gated && !ArmFirstSound(graph)) { Sleep(25); continue; }
+            if (gated) Log(L"First Blood fix: audio rearmed for the new match.\r\n");
+            gated=false;
+            widget=0;
+            lastSound=0;
+            epoch=current;
+        }
+        // Once muted only the match counter matters; it is monotonic, so a
+        // one-second check cannot miss a boundary.
+        if (gated) { Sleep(1000); continue; }
         const auto controller=gLocalController.load(std::memory_order_acquire);
         const auto currentWidget=PerkWidget(controller,graph.widgetClass);
-        const auto now=GetTickCount64();
-        if (!currentWidget) {
-            if (!missingSince) missingSince=now;
-            if (gated && now-missingSince>=2000) {
-                if (ArmFirstSound(graph)) {
-                    gated=false;
-                    Log(L"First Blood fix: audio rearmed for the next match.\r\n");
-                }
-            }
-            // Retain the old widget during a brief visibility gap. If a new
-            // widget appears quickly, its changed identity still resets the
-            // gate; a transient gap in the same match leaves it muted.
-            if (now-missingSince>=2000) {
-                widget=0;
-                lastSound=0;
-            }
-        } else {
-            missingSince=0;
-            if (currentWidget!=widget) {
-                if (gated) {
-                    if (!ArmFirstSound(graph)) { Sleep(25); continue; }
-                    gated=false;
-                    Log(L"First Blood fix: audio rearmed for the new match.\r\n");
-                }
-                widget=currentWidget;
-                lastSound=0;
-            }
+        if (currentWidget) {
+            if (currentWidget!=widget) { widget=currentWidget; lastSound=0; }
             std::uintptr_t sound=0;
             if (Read(widget+0x8e8,sound)) {
-                if (sound==graph.firstSound && sound!=lastSound && !gated) {
-                    if (ReplaceScriptReference(graph.reference,graph.firstSound,0)) {
-                        gated=true;
-                        Log(L"First Blood fix: first cue detected; subsequent first-kill cues muted.\r\n");
-                    }
+                const bool first=sound==graph.firstSound;
+                const bool bonus=sound==graph.bonusSound;
+                if (((first && sound!=lastSound) || bonus) &&
+                    ReplaceScriptReference(graph.reference,graph.firstSound,0)) {
+                    gated=true;
+                    Log(L"First Blood fix: first-kill cue seen; later first-kill cues muted until the next match.\r\n");
                 }
                 lastSound=sound;
             }
         }
-        Sleep(25);
+        Sleep(5);
     }
+}
+// Runs on the game thread after the blue zone hook called the original; not
+// while threads are suspended, so allocation is fine here.
+void ReportBlueZoneRow(std::int32_t selected, std::uint32_t comparison, std::uint32_t number) {
+    const auto base=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    std::string name;
+    wchar_t message[192];
+    if (!Name(base, comparison, name))
+        swprintf_s(message, L"Blue zone: selected index %d\r\n", selected);
+    else if (number) // FName instance numbers are the trailing "_N" plus one.
+        swprintf_s(message, L"Blue zone: selected index %d (%S_%02u)\r\n",
+                   selected, name.c_str(), number - 1);
+    else
+        swprintf_s(message, L"Blue zone: selected index %d (%S)\r\n", selected, name.c_str());
+    Log(message);
 }
 
 // Start after DllMain returns. The console appears before hash verification so
@@ -727,8 +752,15 @@ DWORD WINAPI RunFirstBlood(LPVOID imageBase) {
 DWORD WINAPI Run(LPVOID) {
     wchar_t consoleSetting[2]{};
     if (GetEnvironmentVariableW(L"SP_CLIENT_FIXES_CONSOLE",consoleSetting,2)==1 &&
-        consoleSetting[0]==L'1' && AllocConsole())
+        consoleSetting[0]==L'1' && AllocConsole()) {
         SetConsoleTitleW(L"SP Client Fixes");
+        // Selecting text in a QuickEdit console blocks WriteConsoleW, which
+        // would freeze whichever worker (or the game thread) is logging.
+        HANDLE input=GetStdHandle(STD_INPUT_HANDLE);
+        DWORD mode=0;
+        if (input && input!=INVALID_HANDLE_VALUE && GetConsoleMode(input,&mode))
+            SetConsoleMode(input,(mode&~ENABLE_QUICK_EDIT_MODE)|ENABLE_EXTENDED_FLAGS);
+    }
     Log(L"SP Client Fixes DLL loaded. Checking game build...\r\n");
     if (!SupportedBuild()) {
         Log(L"Client fixes disabled: unsupported executable SHA-256.\r\n");
@@ -736,6 +768,12 @@ DWORD WINAPI Run(LPVOID) {
     }
     Log(L"Supported build. Starting client fixes...\r\n");
     const auto base=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    // Bot-match patches are silent except for the selected blue zone. Each one
+    // verifies the exact bytes first and leaves the game unchanged on any mismatch.
+    (void)standalone_options::Install(base);
+    (void)standalone_options::InstallRate(base);
+    (void)standalone_options::InstallAiTimer(base);
+    (void)standalone_options::InstallBlueZone(base,ReportBlueZoneRow);
     if (!clientfixes_signing::Install(base,Log))
         Log(L"Client fixes: PAK initialization failed.\r\n");
     HANDLE capsuleThread=CreateThread(nullptr,0,RunCapsules,
@@ -747,6 +785,7 @@ DWORD WINAPI Run(LPVOID) {
     if (firstBloodThread) CloseHandle(firstBloodThread);
     else Log(L"First Blood fix: could not start worker thread.\r\n");
     LocalPlayer active{};
+    LocalPlayer adopted{}; // last identity that advanced gMatchEpoch
     LONG original=-1;
     DWORD nextScan=0;
     bool classAnnounced=false;
@@ -759,6 +798,8 @@ DWORD WINAPI Run(LPVOID) {
         } else {
             // Restore only if the same old player info is still accessible
             // and unnetworked. Otherwise a stale pointer is left untouched.
+            // Validation also fails once the world gains a DemoNetDriver
+            // mid-match; gLocalController is deliberately kept in that case.
             if (original >= 0 && SafeToRestore(active))
                 CompareDword(active.info+632, kClassLevel, original);
             active={};
@@ -770,6 +811,11 @@ DWORD WINAPI Run(LPVOID) {
             }
         }
         if (current.info) {
+            if (current.controller!=adopted.controller || current.world!=adopted.world ||
+                current.info!=adopted.info) {
+                gMatchEpoch.fetch_add(1,std::memory_order_acq_rel);
+                adopted=current;
+            }
             active=current;
             gLocalController.store(current.controller,std::memory_order_release);
             LONG level=-1;
@@ -789,7 +835,9 @@ DWORD WINAPI Run(LPVOID) {
                 classAnnounced=true;
             }
         } else {
-            gLocalController.store(0,std::memory_order_release);
+            // Keep the last controller: the tracker's validation can fail while
+            // the match is still running, and the First Blood worker verifies the
+            // widget class on every read. A different controller is adopted above.
         }
         Sleep(250);
     }
@@ -798,7 +846,7 @@ DWORD WINAPI Run(LPVOID) {
 
 // Exported version marker for identifying which DLL was embedded. This number
 // advances when a fix is added; the launcher does not currently branch on it.
-extern "C" __declspec(dllexport) unsigned int SPClientFixesVersion() { return 12; }
+extern "C" __declspec(dllexport) unsigned int SPClientFixesVersion() { return 18; }
 
 // DllMain runs under the Windows loader lock. Only disable thread callbacks
 // and start the bootstrap worker here; do not hash files, scan UObjects, wait

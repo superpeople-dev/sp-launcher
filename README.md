@@ -31,14 +31,6 @@ Rust backend. Windows only.
 - **No-Steam fix.** Before each launch the embedded `XAPOFX1_5.dll` proxy is
   written into the game's `Win64` folder, so the client does not wait for Steam
   (`src-tauri/src/shim.rs`, `src-tauri/resources/README.md`).
-- **Client fixes (on by default).** A separate `SPClientFixes.dll` is loaded only when
-  enabled in Settings. Its source is in `client-fixes/src/`, and the fixes
-  are listed in [`client-fixes/`](client-fixes/README.md). Its debug window is
-  off by default and can be enabled separately in Settings. It currently includes:
-  - **Local class selection:** allows players to choose a class in local games.
-  - **Super Capsules:** allows White and Gold Super Capsules to work when used.
-  - **First Blood:** plays the announcement once per local match.
-  - **Cheat Widget:** translates its Korean command labels to English.
 - **Engine.ini patch.** Before each launch, `n.VerifyPeer=False` and related
   settings are applied (`src-tauri/src/engine_ini.rs`).
 - **Starts the real game exe.** The launcher starts
@@ -51,6 +43,51 @@ Rust backend. Windows only.
   backend's public `/launcher/api/status`).
 - **Discord Rich Presence**, a **news carousel**, editable **launch arguments**
   and **close/minimize to tray**.
+
+## Client fixes
+
+**Apply client fixes** is on by default and can be switched off in Settings.
+The bundle targets development build `1.3.0.473797`: the launcher checks the
+game executable before deploying the DLL and the matched signed PAK/`.sig` pair.
+The optional debug window is off by default. The no-Steam proxy is separate.
+
+### DLL (`SPClientFixes.dll`)
+
+- Allows class selection in standalone local games by adjusting the local
+  player's level when needed.
+- Corrects the White and Gold Super Capsule buff IDs.
+- Limits the First Blood audio cue to once per local match, including later bot
+  kills, without altering kill counts or playing a replacement cue.
+- Adjusts standalone bot-match startup requests to 50 AI players. Bot matches
+  choose randomly among the twenty 40-50 player blue-zone layouts. 
+- Accepts the bundled PAK's signature only at the expected ClientFixes path and
+  makes PAK lookups respect mount order, so its cooked asset overrides load
+  together. Other PAK signature checks remain in place.
+
+### Signed PAK (`BravoHotelGame-ClientFixes_P.pak`)
+
+- Adds the lower-right **BOT GAME** button to the lobby with the caption
+  "50 Bots - Random Blue Zone". Its click calls the game's standalone match
+  entry point; the DLL supplies the bot-match settings above.
+- Adds localized `Game.locres` catalogs and overrides across 20
+  cultures, including English cheat-command descriptions and other menu text.
+- Patches cooked UI assets for HUD health, stance, ammo and weapon layout, 
+  bringing back the original CBT UI;
+- Updated Management and Black Market presentation; and removed the inventory's 
+  obsolete Black Market entry. 
+
+
+### Deployment
+
+Enabled launches deploy all three files for the game session and remove them
+after exit. Disabled launches recover recognized leftovers and inject none of
+them. The launcher records deployed hashes outside the game folder and holds
+an exclusive session lock to recover after interrupted runs. Unknown or
+modified files are preserved and block launch rather than being overwritten.
+The no-Steam fix remains independent. A saved
+`-ExecCmds="PakFile.SearchRecentlyFoundPaks 0"` from older tests is dropped
+from launch arguments because the DLL handles ordered lookup; other
+`-ExecCmds` values are passed through unchanged.
 
 ## Building
 
@@ -129,16 +166,3 @@ No license has been chosen yet. All rights reserved unless a `LICENSE` file
 says otherwise. The bundled fonts (Refrigerator Deluxe, `src/assets/fonts/`)
 are commercial fonts: check their license before making this repository
 public.
-
-With Client fixes on, the DLL makes PAK lookups follow mount priority (same
-effect as `PakFile.SearchRecentlyFoundPaks 0`). A saved
-`-ExecCmds="PakFile.SearchRecentlyFoundPaks 0"` from older test builds is dropped
-from the launch arguments. Other `-ExecCmds` values are passed through unchanged.
-
-## Client fixes resources and lifecycle
-
-Client fixes bundles the DLL, translated PAK and signature together. Enabled launches deploy all three before starting the supported game build and remove them after exit. Disabled launches recover recognized leftovers and inject none of these resources. Steam integration remains independent.
-
-The launcher records deployed hashes outside the game folder and holds an exclusive session lock. It recovers completed files after an interrupted launcher session. Unknown or modified files are preserved and block launch; a file interrupted halfway through writing requires manual inspection. The exact artifacts from the successful preservation test and the DLL shipped with launcher 0.3.2 are recognized for migration.
-
-Translations live entirely in the PAK. The DLL retains scoped signature verification and the validated ordered-lookup patch; translation functions, cache polling and temporary lookup diagnostics have been removed. Ordered lookup can scan more archives than the game's recent-archive shortcut. GitHub Actions checks the bundled signature and deployment lifecycle before building the executable.
