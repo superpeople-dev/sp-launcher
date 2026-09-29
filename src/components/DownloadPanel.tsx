@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -78,10 +78,32 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
     if (st && ORDER.includes(st.phase)) setLastActive(st.phase);
   }, [st]);
 
-  if (!st) return <section className="panel dl is-active" />;
+  const active = st != null && ["checking", "downloading", "verifying", "extracting"].includes(st.phase);
+  const resumable = st != null && (st.phase === "paused" || (st.phase === "failed" && st.done > 0));
+  // The game already installed: nothing to download, and no Download button.
+  const ready = installed && !active && !resumable;
 
-  const active = ["checking", "downloading", "verifying", "extracting"].includes(st.phase);
-  const resumable = st.phase === "paused" || (st.phase === "failed" && st.done > 0);
+  // The installed game's folder is the one shown.
+  useEffect(() => {
+    if (ready && installDir) setDir(installDir);
+  }, [ready, installDir]);
+
+  // A folder that already has the game (a copy the player had, or an earlier
+  // install) becomes the Game folder at once, instead of offering a download.
+  const onFolderRef = useRef(onFolder);
+  useEffect(() => {
+    onFolderRef.current = onFolder;
+  }, [onFolder]);
+  useEffect(() => {
+    const target = dir.trim();
+    if (installed || active || resumable || !target) return;
+    const t = window.setTimeout(() => {
+      void invoke<string | null>("find_game", { dir: target }).then((found) => found && onFolderRef.current(found));
+    }, 400);
+    return () => window.clearTimeout(t);
+  }, [dir, installed, active, resumable]);
+
+  if (!st) return <section className="panel dl is-active" />;
   const pct = st.total > 0 ? Math.min(100, (st.done / st.total) * 100) : 0;
   const lowSpace = st.free_bytes != null && st.needed_bytes != null && st.free_bytes < st.needed_bytes;
 
@@ -109,7 +131,7 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
     const cur = st.phase === "paused" || st.phase === "failed" ? lastActive : st.phase;
     const a = ORDER.indexOf(phase);
     const b = ORDER.indexOf(cur);
-    if (st.phase === "done" || b > a) return { cls: "ok", text: "Done" };
+    if (ready || st.phase === "done" || b > a) return { cls: "ok", text: "Done" };
     if (b === a) {
       if (st.phase === "paused") return { cls: "wait", text: "Paused" };
       if (st.phase === "failed") return { cls: "busy", text: "Stopped" };
@@ -120,16 +142,6 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
 
   return (
     <section className="panel dl is-active">
-      {installed && st.phase !== "done" && (
-        <div className="card">
-          <h2 className="card__title">Game installed</h2>
-          <p className="field__hint">
-            The game is ready in <strong>{installDir}</strong>. You only need this tab to repair a broken install
-            or to move it: pick a new Game folder below and press Download.
-          </p>
-        </div>
-      )}
-
       <div className="card">
         <h2 className="card__title">Game folder</h2>
         {!installed && (
@@ -165,22 +177,25 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
 
         <div className="bigprogress">
           <div className="bigprogress__head">
-            <span className="bigprogress__pct">{st.phase === "idle" ? "—" : `${pct.toFixed(1)}%`}</span>
+            <span className="bigprogress__pct">{ready ? "100%" : st.phase === "idle" ? "—" : `${pct.toFixed(1)}%`}</span>
             <span className="bigprogress__speed">
-              {STEP_LABEL[st.phase]}
-              {st.speed > 0 && ` · ${rate(st.speed)}`}
-              {st.eta_secs != null && ` · ${duration(st.eta_secs)}`}
+              {ready ? STEP_LABEL.done : STEP_LABEL[st.phase]}
+              {!ready && st.speed > 0 && ` · ${rate(st.speed)}`}
+              {!ready && st.eta_secs != null && ` · ${duration(st.eta_secs)}`}
             </span>
           </div>
           <div className="bigprogress__track">
             <div
               className={`bigprogress__fill${st.phase === "paused" ? " is-paused" : ""}${st.phase === "failed" ? " is-failed" : ""}`}
-              style={{ width: `${pct}%` }}
+              style={{ width: `${ready ? 100 : pct}%` }}
             />
           </div>
           <div className="bigprogress__file">
-            {st.total > 0 ? `${bytes(st.done)} of ${bytes(st.total)}` : ""}
-            {st.message ? `${st.total > 0 ? " — " : ""}${st.message}` : ""}
+            {ready
+              ? `In ${installDir}`
+              : `${st.total > 0 ? `${bytes(st.done)} of ${bytes(st.total)}` : ""}${
+                  st.message ? `${st.total > 0 ? " — " : ""}${st.message}` : ""
+                }`}
           </div>
         </div>
 
@@ -205,7 +220,7 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
             <button className="btn btn--primary" type="button" onClick={start}>
               Continue
             </button>
-          ) : st.phase === "done" ? null : (
+          ) : ready || st.phase === "done" ? null : (
             <button className="btn btn--primary" type="button" disabled={!dir.trim()} onClick={start}>
               {st.phase === "failed" ? "Try again" : "Download"}
             </button>
@@ -217,8 +232,9 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
           )}
         </div>
         <p className="field__hint" style={{ marginTop: 10 }}>
-          You can close the launcher window while it downloads — it keeps going from the tray, and your PC won't go to
-          sleep. If the launcher is quit or the PC restarts, press Continue to resume where it stopped.
+          {ready
+            ? "Nothing to download: the game is already in this folder. To install it somewhere else, pick an empty folder above."
+            : "You can close the launcher window while it downloads — it keeps going from the tray, and your PC won't go to sleep. If the launcher is quit or the PC restarts, press Continue to resume where it stopped."}
         </p>
       </div>
     </section>

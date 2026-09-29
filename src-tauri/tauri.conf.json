@@ -16,9 +16,12 @@
         "title": "SP Launcher",
         "width": 980,
         "height": 590,
-        "minWidth": 880,
+        "minWidth": 980,
+        "maxWidth": 980,
         "minHeight": 540,
+        "maxHeight": 590,
         "resizable": true,
+        "maximizable": false,
         "decorations": false,
         "center": true,
         "transparent": false

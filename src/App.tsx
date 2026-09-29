@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Update } from "@tauri-apps/plugin-updater";
 
 import { TitleBar } from "./components/TitleBar";
@@ -98,7 +99,10 @@ export default function App() {
   // launcher that can't reach its update server should still open normally.
   // A check the user asked for always reports what went wrong, so a dead
   // endpoint can't masquerade as "up to date".
+  const lastUpdateCheck = useRef(0);
+  const installingRef = useRef(false);
   const runUpdateCheck = useCallback((quiet = false) => {
+    lastUpdateCheck.current = Date.now();
     setCheckingUpdate(true);
     setUpdateError(null);
     void checkForUpdate()
@@ -117,14 +121,40 @@ export default function App() {
     runUpdateCheck(true);
   }, [runUpdateCheck]);
 
+  // Coming back to the launcher (clicking it, or opening it from the tray)
+  // checks again, quietly: one left open in the tray for days would otherwise
+  // only hear of an update when restarted. It also re-reads the game folder,
+  // in case the game was moved or removed meanwhile. At most once a minute,
+  // and never while an update is installing.
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let gone = false;
+    void getCurrentWindow()
+      .onFocusChanged(({ payload: focused }) => {
+        if (!focused || installingRef.current || Date.now() - lastUpdateCheck.current < 60_000) return;
+        runUpdateCheck(true);
+        void invoke<InstallState>("install_state").then(setInstall).catch(() => {});
+      })
+      .then((unlisten) => {
+        if (gone) unlisten();
+        else off = unlisten;
+      });
+    return () => {
+      gone = true;
+      off?.();
+    };
+  }, [runUpdateCheck]);
+
   const runUpdateInstall = useCallback(() => {
     if (!update) return;
+    installingRef.current = true;
     setInstallingUpdate(true);
     setUpdateProgress(null);
     void installUpdate(update, (done, total) => setUpdateProgress({ done, total })).catch((e) => {
       // A successful run typically exits the process itself (see
       // lib/updater.ts) before this ever runs — only a genuine failure
       // reaches here.
+      installingRef.current = false;
       setInstallingUpdate(false);
       setError(`Update failed: ${String(e)}`);
     });
