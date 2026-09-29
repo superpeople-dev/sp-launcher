@@ -10,6 +10,8 @@
 #    * no XAPOFX1_5.dll bundled -> every player who lacks it by hand gets a
 #      game that never leaves the loading screen, because the launcher passes
 #      -ServicePlatform= and nothing intercepts the Steam subsystem request.
+#      It is fetched from the latest sp-native build (tools/fetch-binaries.ps1),
+#      so gh must be signed in with access to superpeople-dev/sp-native.
 #    * no signing key -> the build SUCCEEDS and produces no .sig, and every
 #      launcher then rejects the update as unsigned. UPDATING.md calls this
 #      out; it is still easy to do at 2am.
@@ -32,32 +34,23 @@ $remote   = '/var/www/html/launcher/updates/'            # per UPDATING.md
 Write-Host "SP Launcher $version" -ForegroundColor Cyan
 Write-Host "  endpoint: $endpoint"
 
-# --- 1. the DLL ------------------------------------------------------------
-$dll = 'src-tauri\resources\XAPOFX1_5.dll'
-if (-not (Test-Path $dll)) {
-    Write-Host ''
-    Write-Host 'STOP: src-tauri\resources\XAPOFX1_5.dll is missing.' -ForegroundColor Red
-    Write-Host 'The launcher would ship with no no-Steam fix. Players who do not already'
-    Write-Host 'have that DLL by hand cannot start the game at all.'
-    Write-Host ''
-    Write-Host '  cd ..\sp-listen-patch'
-    Write-Host '  build_sp_proxy.bat'
-    Write-Host '  copy dist\XAPOFX1_5.dll ..\sp-launcher\src-tauri\resources\'
-    exit 1
+# --- 1. the game binaries --------------------------------------------------
+# XAPOFX1_5.dll, SPClientFixes.dll and the client fixes pak/.sig come from the
+# latest superpeople-dev/sp-native build, checked against its manifest.json.
+Write-Host '  getting the game binaries from sp-native ...'
+& (Join-Path $PSScriptRoot 'fetch-binaries.ps1')
+foreach ($binary in @('src-tauri\resources\XAPOFX1_5.dll', 'src-tauri\resources\SPClientFixes.dll',
+                      'src-tauri\resources\client-fixes\BravoHotelGame-ClientFixes_P.pak',
+                      'src-tauri\resources\client-fixes\BravoHotelGame-ClientFixes_P.sig')) {
+    if (-not (Test-Path -LiteralPath $binary)) {
+        Write-Host ''
+        Write-Host "STOP: $binary is missing." -ForegroundColor Red
+        Write-Host 'Without XAPOFX1_5.dll players who lack it by hand never leave the loading'
+        Write-Host 'screen; without the client fixes files the toggle cannot work.'
+        exit 1
+    }
 }
-Write-Host "  DLL bundled: $((Get-Item $dll).Length) bytes" -ForegroundColor Green
-foreach ($fixResource in @('src-tauri\resources\client-fixes\BravoHotelGame-ClientFixes_P.pak', 'src-tauri\resources\client-fixes\BravoHotelGame-ClientFixes_P.sig')) {
-    if (-not (Test-Path -LiteralPath $fixResource)) { throw "Missing bundled Client fixes resource: $fixResource" }
-}
-$clientFixesDll = 'src-tauri\resources\SPClientFixes.dll'
-if (-not (Test-Path $clientFixesDll)) {
-    Write-Host ''
-    Write-Host 'STOP: src-tauri\resources\SPClientFixes.dll is missing.' -ForegroundColor Red
-    Write-Host 'The Client fixes toggle would be present but could not load its DLL.'
-    Write-Host 'Build it using client-fixes/README.md before publishing.'
-    exit 1
-}
-Write-Host "  client fixes DLL bundled: $((Get-Item $clientFixesDll).Length) bytes" -ForegroundColor Green
+Write-Host '  game binaries bundled' -ForegroundColor Green
 
 # --- 2. the signing key ----------------------------------------------------
 # Tauri wants the key's CONTENTS, not its path (UPDATING.md step 2).

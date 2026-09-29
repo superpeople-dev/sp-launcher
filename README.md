@@ -51,6 +51,10 @@ The bundle targets development build `1.3.0.473797`: the launcher checks the
 game executable before deploying the DLL and the matched signed PAK/`.sig` pair.
 The optional debug window is off by default. The no-Steam proxy is separate.
 
+The DLL, the PAK and the no-Steam proxy are built, tested and signed in
+[superpeople-dev/sp-native](https://github.com/superpeople-dev/sp-native); the
+launcher bundles the files of its latest release.
+
 ### DLL (`SPClientFixes.dll`)
 
 - Allows class selection in standalone local games by adjusting the local
@@ -104,13 +108,16 @@ bun run tauri dev      # development, hot reload
 bun run tauri build    # NSIS installer in src-tauri/target/release/bundle/nsis/
 ```
 
-Three binaries can be embedded at build time and are **not** in the repo. See
+Some binaries are embedded at build time and are **not** in the repo. See
 [src-tauri/resources/README.md](src-tauri/resources/README.md):
 
-- `src-tauri/resources/XAPOFX1_5.dll` is the no-Steam proxy, built from
-  `sp-listen-patch/sp_proxy.cpp`. It is required for a release.
-- `src-tauri/resources/SPClientFixes.dll` is built from `client-fixes/` and
-  loaded only when the Client fixes toggle is on. It is required for a release.
+- The game binaries: `XAPOFX1_5.dll` (the no-Steam proxy), `SPClientFixes.dll`
+  and the client fixes PAK/`.sig`. They come from the latest
+  [sp-native](https://github.com/superpeople-dev/sp-native) release:
+  `powershell -ExecutionPolicy Bypass -File tools\fetch-binaries.ps1` downloads
+  them into `src-tauri/resources` and checks each against the release's
+  `manifest.json`. You need `gh` signed in with access to sp-native. They are
+  required for a release.
 - `src-tauri/resources/7za.exe` comes from the 7-Zip Extra package. It is
   recommended.
 
@@ -118,10 +125,8 @@ A fresh clone still compiles without them (`build.rs` only warns).
 
 For an unsigned Windows build without an installer, run the
 [Unsigned Windows build](.github/workflows/unsigned-build.yml) GitHub Action.
-It compiles `SPClientFixes.dll`, embeds it in the Tauri executable, and uploads
-both binaries as a workflow artifact. The no-Steam proxy is not built by this
-repository, so this artifact does not include it; testing game launch still
-requires `XAPOFX1_5.dll` in the game folder.
+It embeds the latest sp-native binaries in the Tauri executable and uploads it
+as a workflow artifact.
 
 ## Releasing an update
 

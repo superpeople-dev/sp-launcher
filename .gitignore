@@ -14,8 +14,12 @@ latest.json
 *.msi
 
 # ---- binaries embedded at build time (see src-tauri/resources/README.md) ---
+# The game binaries come from a superpeople-dev/sp-native release
+# (tools/fetch-binaries.ps1), 7za.exe from 7-Zip.
 src-tauri/resources/XAPOFX1_5.dll
 src-tauri/resources/SPClientFixes.dll
+src-tauri/resources/client-fixes/
+src-tauri/resources/sp-native.json
 src-tauri/resources/7za.exe
 
 # ---- secrets: NEVER commit ---------------------------------------------------
@@ -45,9 +49,4 @@ Thumbs.db
 Claude outputs/
 manifest.json
 
-# Signed client-fixes payload is deliberately versioned.
-!src-tauri/resources/client-fixes/BravoHotelGame-ClientFixes_P.sig
 tools/client-fixes-tests/target/
-
-
-!src-tauri/resources/client-fixes/BravoHotelGame-ClientFixes_P.pak
