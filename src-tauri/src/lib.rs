@@ -539,6 +539,24 @@ async fn find_game(dir: String) -> Option<String> {
         .unwrap_or(None)
 }
 
+/// The Download tab's Uninstall: deletes the game from the Game folder
+/// (download::uninstall says what goes). Not while the game runs, from this
+/// launcher or not. Off the UI thread: that is tens of GB of files.
+#[tauri::command]
+async fn uninstall_game(app: AppHandle) -> Result<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let running = state.running_pid.lock().expect("pid mutex").is_some();
+        if running || client_fixes_deployment::ensure_no_game_running().is_err() {
+            return Err(LauncherError::Message("Close the game before uninstalling it.".into()));
+        }
+        let dir = state.config.lock().expect("config mutex").install_dir.clone();
+        download::uninstall(&app, &state.download, &dir)
+    })
+    .await
+    .map_err(|e| LauncherError::Message(e.to_string()))?
+}
+
 // ------------------------------------------------------------------ entry ---
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -660,6 +678,7 @@ pub fn run() {
             download_cancel,
             download_default_dir,
             find_game,
+            uninstall_game,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -45,7 +45,7 @@ export function SettingsPanel({
   const needsSetup = config.hosts_redirect && hosts && !hosts.applied;
 
   async function browse() {
-    const picked = await pickInstallFolder();
+    const picked = await pickInstallFolder(config.install_dir);
     if (picked) onConfig({ install_dir: picked });
   }
 

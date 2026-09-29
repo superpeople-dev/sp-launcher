@@ -286,6 +286,50 @@ pub fn cancel(app: &AppHandle, dl: &Downloader) -> Result<()> {
     Ok(())
 }
 
+/// Uninstall: delete the game from `dir`, the Game folder. Only what the
+/// archive puts there goes (see `remove_game`), so a Game folder that also
+/// holds other files -- or is a whole drive -- keeps them. The folder setting
+/// stays: Download puts the game back in the same place.
+pub fn uninstall(app: &AppHandle, dl: &Downloader, dir: &str) -> Result<()> {
+    if dl.is_running() {
+        return Err("A download is running. Cancel it before uninstalling.".into());
+    }
+    let dir = dir.trim();
+    if dir.is_empty() || !crate::game::detect(dir).installed {
+        return Err(LauncherError::Message(format!("There is no game to uninstall in {dir}.")));
+    }
+    remove_game(Path::new(dir)).map_err(|e| {
+        LauncherError::Message(format!("Could not delete every game file ({e}). Close anything using them and press Uninstall again."))
+    })?;
+    {
+        let mut st = dl.status.lock().expect("download status");
+        *st = Status::idle(dir.to_string());
+        st.message = "Uninstalled -- the game was deleted.".into();
+    }
+    let _ = app.emit("download:status", dl.status());
+    Ok(())
+}
+
+/// Deletes the game's own entries from `root`: the two game folders, the
+/// DepotDownloader leftovers, then the exe -- last, so a failure halfway (a
+/// locked file) still shows the game as installed and Uninstall can be pressed
+/// again. The folder itself goes only if that leaves it empty. `remove_dir_all`
+/// deletes a link, never what it points to.
+fn remove_game(root: &Path) -> std::io::Result<()> {
+    for name in ["BravoHotelGame", "Engine", ".DepotDownloader"] {
+        let path = root.join(name);
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        }
+    }
+    let exe = root.join(crate::game::GAME_EXE);
+    if exe.exists() {
+        std::fs::remove_file(&exe)?;
+    }
+    let _ = std::fs::remove_dir(root);
+    Ok(())
+}
+
 // ----------------------------------------------------------------- worker ---
 
 enum Stop {
@@ -1138,5 +1182,40 @@ mod tests {
         std::fs::create_dir_all(deep.join("Engine")).unwrap();
         std::fs::write(deep.join(crate::game::GAME_EXE), b"x").unwrap();
         assert_eq!(find_install_root(tmp.path()), None);
+    }
+
+    fn fake_game(root: &Path) {
+        std::fs::create_dir_all(root.join("BravoHotelGame/Content/Paks")).unwrap();
+        std::fs::create_dir_all(root.join("Engine/Binaries")).unwrap();
+        std::fs::create_dir_all(root.join(".DepotDownloader")).unwrap();
+        std::fs::write(root.join("BravoHotelGame/Content/Paks/a.pak"), b"x").unwrap();
+        std::fs::write(root.join(crate::game::GAME_EXE), b"x").unwrap();
+    }
+
+    #[test]
+    fn uninstall_removes_the_game_and_its_empty_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("SUPER PEOPLE");
+        fake_game(&root);
+        remove_game(&root).unwrap();
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn uninstall_keeps_what_is_not_the_game() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fake_game(root);
+        std::fs::create_dir_all(root.join("Screenshots")).unwrap();
+        std::fs::write(root.join("notes.txt"), b"mine").unwrap();
+        std::fs::create_dir_all(root.join(TEMP_DIR)).unwrap();
+        remove_game(root).unwrap();
+        for gone in ["BravoHotelGame", "Engine", ".DepotDownloader", crate::game::GAME_EXE] {
+            assert!(!root.join(gone).exists(), "{gone} is left");
+        }
+        assert!(root.join("Screenshots").is_dir());
+        assert_eq!(std::fs::read(root.join("notes.txt")).unwrap(), b"mine");
+        assert!(root.join(TEMP_DIR).is_dir(), "a paused download is not the game");
+        assert!(!crate::game::detect(&root.to_string_lossy()).installed);
     }
 }
