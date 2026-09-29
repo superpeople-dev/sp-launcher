@@ -58,7 +58,7 @@ jobs:
             exit 1
           }
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # the tags (version) and the history (release notes)
 
@@ -90,7 +90,7 @@ jobs:
       # Bun installs the packages and runs the scripts (its version: package.json,
       # packageManager); Node still runs the tools/*.mjs scripts and the CLIs'
       # own launchers (vite, tsc, tauri).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.version.outputs.skip != 'true'
         with:
           node-version: '22'
