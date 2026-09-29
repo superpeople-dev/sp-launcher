@@ -1,8 +1,8 @@
 name: Unsigned Windows build
 
 # Every push to main and every pull request builds and tests the launcher, so a
-# ready unsigned build is always there (Actions -> run -> Artifacts). Releases
-# stay manual: they are signed by Alice alone.
+# ready unsigned build is always there (Actions -> run -> Artifacts). Signed
+# releases are release.yml's.
 on:
   push:
     branches: [main]

@@ -1,0 +1,229 @@
+name: Release
+
+# Every push to main that changes the launcher publishes a signed release, the
+# same build tools/publish-update.ps1 makes by hand: both DLLs and 7za.exe
+# bundled, the installer signed, latest.json written. The GitHub release holds
+# the installer, its .sig and latest.json; launchers from 0.3.4 on read
+# latest.json there first (tauri.conf.json, plugins.updater.endpoints).
+#
+# Version: the one in src-tauri/tauri.conf.json when it is newer than the last
+# release, otherwise the last release with its patch number + 1. A commit whose
+# message contains [skip release] is not released.
+#
+# The signing key and the sp-listen-patch deploy key are secrets of the
+# "release" environment, which only main can use (UPDATING.md, "Automatic
+# releases").
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/workflows/unsigned-build.yml'
+      - '.github/workflows/client-fixes-dll.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    runs-on: windows-2022
+    environment: release
+    env:
+      # 7-Zip Extra 26.03 from 7-Zip's own GitHub releases, checked against the
+      # digest GitHub lists for that file.
+      SEVENZIP_URL: https://github.com/ip7z/7zip/releases/download/26.03/7z2603-extra.7z
+      SEVENZIP_SHA256: 191894e6acb3647ffb69ce630479ff318523b2e2b9890aa7f05c1127c2e59b8f
+
+    steps:
+      - name: Check the release secrets
+        shell: pwsh
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          LISTEN_PATCH_KEY: ${{ secrets.SP_LISTEN_PATCH_DEPLOY_KEY }}
+        run: |
+          $missing = @()
+          if (-not $env:SIGNING_KEY) { $missing += 'TAURI_SIGNING_PRIVATE_KEY' }
+          if (-not $env:LISTEN_PATCH_KEY) { $missing += 'SP_LISTEN_PATCH_DEPLOY_KEY' }
+          if ($missing) {
+            Write-Host "::error::The release environment is missing: $($missing -join ', '). See UPDATING.md, Automatic releases."
+            exit 1
+          }
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the tags (version) and the history (release notes)
+
+      - name: Pick the version
+        id: version
+        shell: pwsh
+        run: |
+          if (git tag --points-at HEAD --list 'v*') {
+            Write-Host "::notice::This commit is already released."
+            "skip=true" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          $inRepo = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $last = git tag --list 'v*' |
+            ForEach-Object { $_.Substring(1) } |
+            Where-Object { $_ -match '^\d+\.\d+\.\d+$' } |
+            Sort-Object { [version]$_ } |
+            Select-Object -Last 1
+          if (-not $last -or [version]$inRepo -gt [version]$last) {
+            $version = $inRepo
+          } else {
+            $v = [version]$last
+            $version = "$($v.Major).$($v.Minor).$($v.Build + 1)"
+          }
+          Write-Host "Releasing $version (last release: $last, repository: $inRepo)"
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "previous=$last" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/checkout@v4
+        if: steps.version.outputs.skip != 'true'
+        with:
+          repository: superpeople-dev/sp-listen-patch
+          ssh-key: ${{ secrets.SP_LISTEN_PATCH_DEPLOY_KEY }}
+          path: _deps/sp-listen-patch
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        if: steps.version.outputs.skip != 'true'
+        with:
+          node-version: '22'
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.version.outputs.skip != 'true'
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.version.outputs.skip != 'true'
+        with:
+          workspaces: |
+            src-tauri
+            tools/client-fixes-tests
+
+      - name: Install frontend dependencies
+        if: steps.version.outputs.skip != 'true'
+        run: npm ci
+
+      - name: Set the version
+        if: steps.version.outputs.skip != 'true'
+        run: node tools/set-version.mjs ${{ steps.version.outputs.version }}
+
+      - name: Verify bundled ClientFixes resources
+        if: steps.version.outputs.skip != 'true'
+        run: node tools/verify-clientfixes-resources.mjs
+
+      - name: Build the client fixes DLL
+        if: steps.version.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          cmake -S client-fixes -B client-fixes/build -A x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build client-fixes/build --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir client-fixes/build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath client-fixes/build/Release/SPClientFixes.dll -Destination src-tauri/resources/SPClientFixes.dll
+
+      - name: Check client fixes deployment lifecycle
+        if: steps.version.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          cargo test --manifest-path tools/client-fixes-tests/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Find Visual Studio
+        if: steps.version.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'no Visual Studio with the C++ tools' }
+          "VSDIR=$vs" >> $env:GITHUB_ENV
+
+      # The no-Steam proxy, exactly as sp-listen-patch/build_sp_proxy.bat
+      # builds it: x64, its own C runtime (/MT).
+      - name: Build the no-Steam proxy (XAPOFX1_5.dll)
+        if: steps.version.outputs.skip != 'true'
+        shell: cmd
+        run: |
+          call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cd /d "%GITHUB_WORKSPACE%\_deps\sp-listen-patch" || exit /b 1
+          cl /nologo /LD /MT /O2 /EHsc /std:c++17 /DNDEBUG sp_proxy.cpp /Fe:sp_proxy.dll /link user32.lib || exit /b 1
+          dumpbin /headers sp_proxy.dll | findstr /c:"8664 machine (x64)" >nul || (echo sp_proxy.dll is not x64 & exit /b 1)
+          copy /y sp_proxy.dll "%GITHUB_WORKSPACE%\src-tauri\resources\XAPOFX1_5.dll" >nul || exit /b 1
+
+      - name: Bundle 7za.exe
+        if: steps.version.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP '7z-extra.7z'
+          Invoke-WebRequest $env:SEVENZIP_URL -OutFile $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:SEVENZIP_SHA256) { throw "7-Zip Extra does not match its checksum: $hash" }
+          $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue)?.Source ?? "$env:ProgramFiles\7-Zip\7z.exe"
+          & $sevenZip x $archive "-o$env:RUNNER_TEMP\7z-extra" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw '7-Zip Extra could not be unpacked' }
+          Copy-Item -LiteralPath "$env:RUNNER_TEMP\7z-extra\x64\7za.exe" -Destination src-tauri/resources/7za.exe
+
+      - name: Build and sign the installer
+        if: steps.version.outputs.skip != 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # The current key has none; set anyway so Tauri never asks for one.
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build
+
+      - name: Prepare the release files
+        if: steps.version.outputs.skip != 'true'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+        run: |
+          $setup = Get-ChildItem src-tauri/target/release/bundle/nsis -Filter "*_${env:VERSION}_x64-setup.exe" | Select-Object -First 1
+          if (-not $setup) { throw "no installer for $env:VERSION" }
+          if (-not (Test-Path "$($setup.FullName).sig")) {
+            throw 'The installer was built but not signed, so no launcher would accept it. Check TAURI_SIGNING_PRIVATE_KEY.'
+          }
+          # The name GitHub gives it (no space), so its address is known.
+          $name = "SP.Launcher_${env:VERSION}_x64-setup.exe"
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          Copy-Item -LiteralPath $setup.FullName -Destination "release/$name"
+          Copy-Item -LiteralPath "$($setup.FullName).sig" -Destination "release/$name.sig"
+
+          $range = if ($env:PREVIOUS) { "v$env:PREVIOUS..HEAD" } else { 'HEAD' }
+          $notes = (git log $range --no-merges --pretty=format:%s | Select-Object -First 20 | ForEach-Object { "- $_" }) -join "`n"
+          if (-not $notes) { $notes = "Version $env:VERSION" }
+
+          node tools/make-update-manifest.mjs `
+            --version $env:VERSION `
+            --sig "release/$name.sig" `
+            --url "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v$env:VERSION/$name" `
+            --notes $notes `
+            --out release/latest.json
+          if ($LASTEXITCODE -ne 0) { throw 'manifest generation failed' }
+
+      - name: Publish the release
+        if: steps.version.outputs.skip != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "v$env:VERSION" (Get-ChildItem release).FullName `
+            --target $env:GITHUB_SHA `
+            --title "sp-launcher v$env:VERSION" `
+            --generate-notes `
+            --latest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "Released [v$env:VERSION](https://github.com/$env:GITHUB_REPOSITORY/releases/tag/v$env:VERSION)" >> $env:GITHUB_STEP_SUMMARY

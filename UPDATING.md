@@ -52,10 +52,13 @@ because you need to redo it.
   `plugins.updater.pubkey`. It's what every future build ships with, so it
   only needs to be set once — until you deliberately rotate keys (see
   "Losing the private key" below).
-- **Update endpoint**: also in `tauri.conf.json`, under
-  `plugins.updater.endpoints` —
-  `http://64.226.112.204/launcher/updates/latest.json`. The launcher polls
-  exactly this URL on every startup.
+- **Update endpoints**: also in `tauri.conf.json`, under
+  `plugins.updater.endpoints`, tried in order until one answers:
+  1. `https://github.com/superpeople-dev/sp-launcher/releases/latest/download/latest.json`,
+     the `latest.json` of the newest GitHub release (from 0.3.4 on; the
+     release workflow publishes it, see "Automatic releases" below);
+  2. `http://64.226.112.204/launcher/updates/latest.json`, the VPS, which
+     is the only one launchers up to 0.3.3 know.
 - **Server folder**: `/var/www/html/launcher/updates/` on the Ubuntu box,
   served by nginx at `http://64.226.112.204/launcher/updates/`.
 
@@ -64,7 +67,73 @@ key), the app has to be rebuilt and redistributed — they're compiled into
 the binary, not read from a config file at runtime, since letting the
 update source be user-editable would defeat the point of signing.
 
-## Releasing a new version — do this every time
+## Automatic releases
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) releases
+every push to `main` that changes the launcher (not docs-only pushes, and not
+a commit whose message contains `[skip release]`). It makes the same build as
+the manual steps below: both DLLs (the no-Steam proxy built from
+`sp-listen-patch`) and `7za.exe` bundled, the installer signed, `latest.json`
+written. It publishes them as a GitHub release, `vX.Y.Z`, which is also what
+the website's Download button points at.
+
+- **Version**: the one in `src-tauri/tauri.conf.json` when it is newer than
+  the last release, otherwise the last release with its patch number + 1. So
+  nothing needs bumping for a patch; for 0.4.0, set 0.4.0 in the three files
+  in the pull request.
+- **Where launchers find it**: `latest.json` on the newest GitHub release,
+  the first update endpoint from 0.3.4 on. Its installer URL is the GitHub
+  release asset, so nothing has to be uploaded to the VPS.
+
+### One-time setup
+
+Both secrets live in the repository's **release** environment, which only
+`main` can use: other branches and pull requests never see them.
+
+1. **The environment**: Settings → Environments → New environment `release`
+   → Deployment branches and tags: *Selected branches*, add `main`. No
+   required reviewers, or every release waits for a click.
+2. **`TAURI_SIGNING_PRIVATE_KEY`**: the contents of
+   `%USERPROFILE%\.tauri\sp-launcher-2.key`, added by whoever holds it, on
+   their own machine:
+
+   ```powershell
+   Get-Content "$env:USERPROFILE\.tauri\sp-launcher-2.key" -Raw | gh secret set TAURI_SIGNING_PRIVATE_KEY --env release -R superpeople-dev/sp-launcher
+   ```
+
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is only needed if the key ever gets a
+   password again.
+3. **`SP_LISTEN_PATCH_DEPLOY_KEY`**: a read-only deploy key on the private
+   `sp-listen-patch` repository, so the workflow can build the no-Steam proxy:
+
+   ```powershell
+   ssh-keygen -t ed25519 -N '""' -C "sp-launcher release" -f sp-listen-patch-deploy
+   gh repo deploy-key add sp-listen-patch-deploy.pub -R superpeople-dev/sp-listen-patch --title "sp-launcher release workflow"
+   Get-Content sp-listen-patch-deploy -Raw | gh secret set SP_LISTEN_PATCH_DEPLOY_KEY --env release -R superpeople-dev/sp-launcher
+   Remove-Item sp-listen-patch-deploy, sp-listen-patch-deploy.pub
+   ```
+
+Without either secret the workflow fails at its first step and says which is
+missing; it never publishes an unsigned build.
+
+### Launchers up to 0.3.3
+
+They only know the VPS endpoint. After the first automatic release (0.3.4),
+put its `latest.json` there once; its installer URL already points at GitHub:
+
+```powershell
+gh release download v0.3.4 -p latest.json -R superpeople-dev/sp-launcher
+scp latest.json root@64.226.112.204:/var/www/html/launcher/updates/latest.json
+```
+
+Those launchers then update to 0.3.4, and from there follow GitHub. The VPS
+file can stay as it is after that.
+
+## Releasing a new version by hand
+
+Only needed when the workflow can't run. A version released by hand must also
+be a GitHub release with its `latest.json` (see the workflow's last two steps),
+or launchers from 0.3.4 on, which read GitHub first, won't see it.
 
 > `powershell -ExecutionPolicy Bypass -File tools\publish-update.ps1` runs
 > steps 1b to 3 for you, asking for the key password up front (Tauri's own
