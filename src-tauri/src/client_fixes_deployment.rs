@@ -168,16 +168,32 @@ impl Drop for Deployment {
         if let Err(e) = self.cleanup() { eprintln!("[client fixes] {e}"); }
     }
 }
+// The game's process names: the bootstrap exe and the one it starts.
+fn is_game_exe(path: &str) -> bool {
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    name.eq_ignore_ascii_case("BravoHotelClient-Win64-Shipping.exe") || name.eq_ignore_ascii_case("BravoHotelClient.exe")
+}
+// Whether the recorded game is still running. The pid outlives the game: when
+// the launcher was closed or updated during a match, the record keeps it, and
+// Windows gives the number to another process -- after a restart often a system
+// process this launcher may not open. Refusing then blocked every launch
+// ("Cannot confirm that the previous game exited"). So only a process that
+// still runs the game's exe counts; one the launcher cannot open is not the
+// game, which runs as the same user as the launcher.
 #[cfg(windows)]
 fn process_alive(pid: u32) -> Result<bool> {
-    use windows_sys::Win32::{Foundation::{CloseHandle, GetLastError}, System::Threading::{OpenProcess, WaitForSingleObject}};
+    use windows_sys::Win32::{Foundation::CloseHandle, System::Threading::{OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject}};
+    const SYNCHRONIZE_AND_QUERY: u32 = 0x0010_0000 | 0x1000; // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
     unsafe {
-        let process = OpenProcess(0x00100000, 0, pid);
-        if process.is_null() {
-            if GetLastError() == 87 { return Ok(false); }
-            return Err(message("Cannot confirm that the previous game exited. Client fixes files were preserved."));
-        }
-        let status = WaitForSingleObject(process, 0);
+        let process = OpenProcess(SYNCHRONIZE_AND_QUERY, 0, pid);
+        if process.is_null() { return Ok(false); }
+        let mut image = [0u16; 1024];
+        let mut len = image.len() as u32;
+        let named = QueryFullProcessImageNameW(process, 0, image.as_mut_ptr(), &mut len) != 0;
+        let game = named && is_game_exe(&String::from_utf16_lossy(&image[..len as usize]));
+        // Tests stand in for the game with their own process.
+        let game = game || (cfg!(test) && pid == std::process::id());
+        let status = if game { WaitForSingleObject(process, 0) } else { 0 };
         CloseHandle(process);
         match status { 0 => Ok(false), 258 => Ok(true), _ => Err(message("Cannot check the previous game session.")) }
     }
@@ -196,7 +212,7 @@ fn ensure_no_game_running() -> Result<()> {
         loop {
             let len = item.szExeFile.iter().position(|&c| c == 0).unwrap_or(item.szExeFile.len());
             let name = String::from_utf16_lossy(&item.szExeFile[..len]);
-            if name.eq_ignore_ascii_case("BravoHotelClient-Win64-Shipping.exe") || name.eq_ignore_ascii_case("BravoHotelClient.exe") {
+            if is_game_exe(&name) {
                 CloseHandle(snapshot);
                 return Err(message("The game is already running. Close it before launching or changing Client fixes."));
             }
@@ -286,5 +302,29 @@ mod tests {
         assert!(session.cleanup().is_err());session.cleanup_on_drop=false;drop(session);
         assert!(Deployment::prepare(game.path(),state.path(),false,PAYLOADS).is_err());
         assert!(game.path().join(PAK_PATH).exists());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn a_recorded_pid_now_used_by_another_process_does_not_block() {
+        // The launcher closed during a match, then Windows gave the pid away:
+        // to its System process (4), which the launcher may not open, or to a
+        // program that runs but is not the game.
+        let mut other=std::process::Command::new("cmd").args(["/c","ping -n 30 127.0.0.1 >nul"]).spawn().unwrap();
+        for pid in [4, other.id()] {
+            let game=tempfile::tempdir().unwrap();let state=tempfile::tempdir().unwrap();folders(game.path());
+            let mut session=Deployment::prepare(game.path(),state.path(),true,PAYLOADS).unwrap();
+            session.mark_running(pid).unwrap();session.cleanup_on_drop=false;drop(session);
+            let next=Deployment::prepare(game.path(),state.path(),false,PAYLOADS);
+            assert!(next.is_ok(),"pid {pid}: {}",next.err().unwrap());
+            assert!(!game.path().join(PAK_PATH).exists(),"pid {pid}: the orphaned files are cleaned up");
+        }
+        let _=other.kill();let _=other.wait();
+    }
+    #[test]
+    fn only_the_game_exe_is_the_game() {
+        assert!(is_game_exe(r"D:\Games\SUPER PEOPLE\BravoHotelGame\Binaries\Win64\BravoHotelClient-Win64-Shipping.exe"));
+        assert!(is_game_exe("bravohotelclient.exe"));
+        assert!(!is_game_exe(r"C:\Windows\System32\svchost.exe"));
+        assert!(!is_game_exe(r"C:\Games\BravoHotelClient.exe.bak"));
     }
 }
