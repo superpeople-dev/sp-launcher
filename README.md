@@ -123,13 +123,18 @@ requires `XAPOFX1_5.dll` in the game folder.
 
 ## Releasing an update
 
-`tools/publish-update.ps1` builds, signs and writes `latest.json`, then prints
-the two `scp` lines for the VPS: upload the installer first, then
-`latest.json`. The signing key lives in `%USERPROFILE%\.tauri\` and must never
-be committed; `.gitignore` blocks `*.key`. The full procedure, including key
-rotation, is in [UPDATING.md](UPDATING.md). Bump the version in
-`package.json`, `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`
-together.
+Merging to `main` releases it: the [Release](.github/workflows/release.yml)
+workflow builds, signs and publishes a GitHub release with the installer and
+the `latest.json` the launcher's updater reads, bumping the patch version by
+itself. Its one-time setup (the signing key and a deploy key, as secrets of
+the `release` environment) is in [UPDATING.md](UPDATING.md), "Automatic
+releases".
+
+By hand, `tools/publish-update.ps1` builds, signs and writes `latest.json`,
+then prints the two `scp` lines for the VPS. The signing key lives in
+`%USERPROFILE%\.tauri\` and must never be committed; `.gitignore` blocks
+`*.key`. The full procedure, including key rotation, is in
+[UPDATING.md](UPDATING.md).
 
 ## Project layout
 
