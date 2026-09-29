@@ -1,17 +1,20 @@
 name: Release
 
 # Every push to main that changes the launcher publishes a signed release, the
-# same build tools/publish-update.ps1 makes by hand: both DLLs and 7za.exe
-# bundled, the installer signed, latest.json written. The GitHub release holds
+# same build tools/publish-update.ps1 makes by hand: the game binaries of the
+# latest superpeople-dev/sp-native build (both DLLs, the client fixes pak and
+# its .sig) and 7za.exe bundled, the installer signed, latest.json written. The GitHub release holds
 # the installer, its .sig and latest.json; launchers from 0.3.4 on read
 # latest.json there first (tauri.conf.json, plugins.updater.endpoints).
 #
 # Version: the one in src-tauri/tauri.conf.json when it is newer than the last
 # release, otherwise the last release with its patch number + 1. A commit whose
-# message contains [skip release] is not released.
+# message contains [skip release] is not released. Run this workflow by hand
+# (Actions -> Release -> Run workflow) to ship a new sp-native build without a
+# launcher change: that releases even a commit that is released already.
 #
-# The signing key and the sp-listen-patch deploy key are secrets of the
-# "release" environment, which only main can use (UPDATING.md, "Automatic
+# The signing key and SP_NATIVE_TOKEN (read access to sp-native) are secrets of
+# the "release" environment, which only main can use (UPDATING.md, "Automatic
 # releases").
 on:
   push:
@@ -20,7 +23,6 @@ on:
       - '**.md'
       - 'docs/**'
       - '.github/workflows/unsigned-build.yml'
-      - '.github/workflows/client-fixes-dll.yml'
   workflow_dispatch:
 
 concurrency:
@@ -46,11 +48,11 @@ jobs:
         shell: pwsh
         env:
           SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          LISTEN_PATCH_KEY: ${{ secrets.SP_LISTEN_PATCH_DEPLOY_KEY }}
+          NATIVE_TOKEN: ${{ secrets.SP_NATIVE_TOKEN }}
         run: |
           $missing = @()
           if (-not $env:SIGNING_KEY) { $missing += 'TAURI_SIGNING_PRIVATE_KEY' }
-          if (-not $env:LISTEN_PATCH_KEY) { $missing += 'SP_LISTEN_PATCH_DEPLOY_KEY' }
+          if (-not $env:NATIVE_TOKEN) { $missing += 'SP_NATIVE_TOKEN' }
           if ($missing) {
             Write-Host "::error::The release environment is missing: $($missing -join ', '). See UPDATING.md, Automatic releases."
             exit 1
@@ -64,7 +66,7 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          if (git tag --points-at HEAD --list 'v*') {
+          if ((git tag --points-at HEAD --list 'v*') -and $env:GITHUB_EVENT_NAME -ne 'workflow_dispatch') {
             Write-Host "::notice::This commit is already released."
             "skip=true" >> $env:GITHUB_OUTPUT
             exit 0
@@ -84,14 +86,6 @@ jobs:
           Write-Host "Releasing $version (last release: $last, repository: $inRepo)"
           "version=$version" >> $env:GITHUB_OUTPUT
           "previous=$last" >> $env:GITHUB_OUTPUT
-
-      - uses: actions/checkout@v4
-        if: steps.version.outputs.skip != 'true'
-        with:
-          repository: superpeople-dev/sp-listen-patch
-          ssh-key: ${{ secrets.SP_LISTEN_PATCH_DEPLOY_KEY }}
-          path: _deps/sp-listen-patch
-          persist-credentials: false
 
       # Bun installs the packages and runs the scripts (its version: package.json,
       # packageManager); Node still runs the tools/*.mjs scripts and the CLIs'
@@ -126,21 +120,18 @@ jobs:
         if: steps.version.outputs.skip != 'true'
         run: node tools/set-version.mjs ${{ steps.version.outputs.version }}
 
-      - name: Verify bundled ClientFixes resources
-        if: steps.version.outputs.skip != 'true'
-        run: node tools/verify-clientfixes-resources.mjs
-
-      - name: Build the client fixes DLL
+      # XAPOFX1_5.dll, SPClientFixes.dll and the client fixes pak/.sig, built,
+      # tested and signed by sp-native; each checked against its manifest.json.
+      - name: Get the game binaries from sp-native
+        id: native
         if: steps.version.outputs.skip != 'true'
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.SP_NATIVE_TOKEN }}
         run: |
-          cmake -S client-fixes -B client-fixes/build -A x64
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build client-fixes/build --config Release --parallel
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ctest --test-dir client-fixes/build -C Release --output-on-failure
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item -LiteralPath client-fixes/build/Release/SPClientFixes.dll -Destination src-tauri/resources/SPClientFixes.dll
+          ./tools/fetch-binaries.ps1
+          $native = Get-Content src-tauri/resources/sp-native.json -Raw | ConvertFrom-Json
+          "build=$($native.build)" >> $env:GITHUB_OUTPUT
 
       - name: Check client fixes deployment lifecycle
         if: steps.version.outputs.skip != 'true'
@@ -148,26 +139,6 @@ jobs:
         run: |
           cargo test --manifest-path tools/client-fixes-tests/Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Find Visual Studio
-        if: steps.version.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw 'no Visual Studio with the C++ tools' }
-          "VSDIR=$vs" >> $env:GITHUB_ENV
-
-      # The no-Steam proxy, exactly as sp-listen-patch/build_sp_proxy.bat
-      # builds it: x64, its own C runtime (/MT).
-      - name: Build the no-Steam proxy (XAPOFX1_5.dll)
-        if: steps.version.outputs.skip != 'true'
-        shell: cmd
-        run: |
-          call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
-          cd /d "%GITHUB_WORKSPACE%\_deps\sp-listen-patch" || exit /b 1
-          cl /nologo /LD /MT /O2 /EHsc /std:c++17 /DNDEBUG sp_proxy.cpp /Fe:sp_proxy.dll /link user32.lib || exit /b 1
-          dumpbin /headers sp_proxy.dll | findstr /c:"8664 machine (x64)" >nul || (echo sp_proxy.dll is not x64 & exit /b 1)
-          copy /y sp_proxy.dll "%GITHUB_WORKSPACE%\src-tauri\resources\XAPOFX1_5.dll" >nul || exit /b 1
 
       - name: Bundle 7za.exe
         if: steps.version.outputs.skip != 'true'
@@ -196,6 +167,7 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
           PREVIOUS: ${{ steps.version.outputs.previous }}
+          NATIVE: ${{ steps.native.outputs.build }}
         run: |
           $setup = Get-ChildItem src-tauri/target/release/bundle/nsis -Filter "*_${env:VERSION}_x64-setup.exe" | Select-Object -First 1
           if (-not $setup) { throw "no installer for $env:VERSION" }
@@ -211,6 +183,7 @@ jobs:
           $range = if ($env:PREVIOUS) { "v$env:PREVIOUS..HEAD" } else { 'HEAD' }
           $notes = (git log $range --no-merges --pretty=format:%s | Select-Object -First 20 | ForEach-Object { "- $_" }) -join "`n"
           if (-not $notes) { $notes = "Version $env:VERSION" }
+          $notes += "`n- Game binaries: sp-native $env:NATIVE"
 
           node tools/make-update-manifest.mjs `
             --version $env:VERSION `

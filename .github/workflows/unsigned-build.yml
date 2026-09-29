@@ -45,19 +45,19 @@ jobs:
             src-tauri
             tools/client-fixes-tests
 
-      - name: Verify bundled ClientFixes resources
-        run: node tools/verify-clientfixes-resources.mjs
-
-      - name: Build client fixes DLL
+      # The game binaries of the latest sp-native build (built, tested and
+      # signed there). A pull request from a fork gets no secrets: it builds
+      # without them, as a fresh clone does (build.rs warns).
+      - name: Get the game binaries from sp-native
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.SP_NATIVE_TOKEN }}
         run: |
-          cmake -S client-fixes -B client-fixes/build -A x64
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build client-fixes/build --config Release --parallel
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ctest --test-dir client-fixes/build -C Release --output-on-failure
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Copy-Item -LiteralPath client-fixes/build/Release/SPClientFixes.dll -Destination src-tauri/resources/SPClientFixes.dll
+          if (-not $env:GH_TOKEN) {
+            Write-Host '::warning::No SP_NATIVE_TOKEN here: building without the game binaries.'
+            exit 0
+          }
+          ./tools/fetch-binaries.ps1
 
       - name: Check client fixes deployment lifecycle
         shell: pwsh
@@ -76,7 +76,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path artifacts/unsigned -Force | Out-Null
           Copy-Item -LiteralPath src-tauri/target/release/sp-launcher.exe -Destination artifacts/unsigned/
-          Copy-Item -LiteralPath client-fixes/build/Release/SPClientFixes.dll -Destination artifacts/unsigned/
 
       - uses: actions/upload-artifact@v4
         with:
