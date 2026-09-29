@@ -21,12 +21,12 @@ jobs:
     runs-on: windows-2022
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Bun installs the packages and runs the scripts (its version: package.json,
       # packageManager); Node still runs the tools/*.mjs scripts and the CLIs'
       # own launchers (vite, tsc, tauri).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - uses: oven-sh/setup-bun@v2
@@ -78,7 +78,7 @@ jobs:
           Copy-Item -LiteralPath src-tauri/target/release/sp-launcher.exe -Destination artifacts/unsigned/
           Copy-Item -LiteralPath client-fixes/build/Release/SPClientFixes.dll -Destination artifacts/unsigned/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sp-launcher-unsigned-windows-x64
           path: artifacts/unsigned/
