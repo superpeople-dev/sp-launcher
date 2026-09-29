@@ -72,10 +72,16 @@ update source be user-editable would defeat the point of signing.
 [`.github/workflows/release.yml`](.github/workflows/release.yml) releases
 every push to `main` that changes the launcher (not docs-only pushes, and not
 a commit whose message contains `[skip release]`). It makes the same build as
-the manual steps below: both DLLs (the no-Steam proxy built from
-`sp-listen-patch`) and `7za.exe` bundled, the installer signed, `latest.json`
-written. It publishes them as a GitHub release, `vX.Y.Z`, which is also what
-the website's Download button points at.
+the manual steps below: the game binaries of the latest
+[sp-native](https://github.com/superpeople-dev/sp-native) build (both DLLs and
+the client fixes PAK/`.sig`) and `7za.exe` bundled, the installer signed,
+`latest.json` written. It publishes them as a GitHub release, `vX.Y.Z`, which
+is also what the website's Download button points at. The release notes name
+the sp-native build.
+
+- **A new sp-native build without a launcher change**: Actions → Release →
+  *Run workflow* on `main`. A run started by hand releases even a commit that
+  is released already, with the patch number + 1.
 
 - **Version**: the one in `src-tauri/tauri.conf.json` when it is newer than
   the last release, otherwise the last release with its patch number + 1. So
@@ -103,15 +109,21 @@ Both secrets live in the repository's **release** environment, which only
 
    `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is only needed if the key ever gets a
    password again.
-3. **`SP_LISTEN_PATCH_DEPLOY_KEY`**: a read-only deploy key on the private
-   `sp-listen-patch` repository, so the workflow can build the no-Steam proxy:
+3. **`SP_NATIVE_TOKEN`**: a token that can read the private `sp-native`
+   repository's releases. An organization owner creates a fine-grained
+   personal access token (github.com → Settings → Developer settings →
+   Fine-grained tokens): resource owner `superpeople-dev`, only the
+   `sp-native` repository, permission *Contents: Read-only*. Then:
 
    ```powershell
-   ssh-keygen -t ed25519 -N '""' -C "sp-launcher release" -f sp-listen-patch-deploy
-   gh repo deploy-key add sp-listen-patch-deploy.pub -R superpeople-dev/sp-listen-patch --title "sp-launcher release workflow"
-   Get-Content sp-listen-patch-deploy -Raw | gh secret set SP_LISTEN_PATCH_DEPLOY_KEY --env release -R superpeople-dev/sp-launcher
-   Remove-Item sp-listen-patch-deploy, sp-listen-patch-deploy.pub
+   gh secret set SP_NATIVE_TOKEN --env release -R superpeople-dev/sp-launcher
+   gh secret set SP_NATIVE_TOKEN -R superpeople-dev/sp-launcher
    ```
+
+   (paste the token when asked). The second one, a repository secret, lets the
+   unsigned build of pull requests bundle the binaries too. When the token
+   expires, the release fails at its first step until it is replaced.
+   The old `SP_LISTEN_PATCH_DEPLOY_KEY` secret is not used any more.
 
 Without either secret the workflow fails at its first step and says which is
 missing; it never publishes an unsigned build.
@@ -137,8 +149,8 @@ or launchers from 0.3.4 on, which read GitHub first, won't see it.
 
 > `powershell -ExecutionPolicy Bypass -File tools\publish-update.ps1` runs
 > steps 1b to 3 for you, asking for the key password up front (Tauri's own
-> mid-build prompt fails under a script) and refusing to build if the DLL or
-> the key is missing. The manual steps below remain the reference.
+> mid-build prompt fails under a script) and refusing to build if the game
+> binaries or the key are missing. The manual steps below remain the reference.
 
 **1. Bump the version number.** Keep these three in step (they don't have
 to match by a hard requirement, but it avoids confusion):
@@ -146,24 +158,20 @@ to match by a hard requirement, but it avoids confusion):
 - `src-tauri/Cargo.toml` → `[package] version`
 - `package.json` → `"version"`
 
-**1b. Make sure the no-Steam DLL is bundled.** `src-tauri/resources/XAPOFX1_5.dll`
-has to exist, or the launcher ships without it — and since the launcher passes
-`-ServicePlatform=`, every player who does not already have that DLL by hand
-gets a game that never leaves the loading screen.
+**1b. Get the game binaries.** `XAPOFX1_5.dll`, `SPClientFixes.dll` and the
+client fixes PAK/`.sig` come from the latest sp-native release (`gh` must be
+signed in with access to `superpeople-dev/sp-native`):
 
 ```powershell
-cd ..\sp-listen-patch
-.\build_sp_proxy.bat
-copy dist\XAPOFX1_5.dll ..\sp-launcher\src-tauri\resources\
+powershell -ExecutionPolicy Bypass -File tools\fetch-binaries.ps1
 ```
 
-`build.rs` warns when it is missing and the launcher logs `this launcher has
-no DLL bundled` at launch; `tools\publish-update.ps1` refuses to build at all.
-
-**1c. Build the separate client fixes DLL.** The Settings toggle loads
-`src-tauri/resources/SPClientFixes.dll`; it does not affect the no-Steam
-proxy. Follow [client-fixes/README.md](client-fixes/README.md) to build and
-copy it. The release script refuses to publish without this payload.
+It checks every file against the release's `manifest.json`. Without
+`XAPOFX1_5.dll` the launcher ships without the no-Steam fix — and since it
+passes `-ServicePlatform=`, every player who does not already have that DLL
+by hand gets a game that never leaves the loading screen. `build.rs` warns
+when it is missing and the launcher logs `this launcher has no DLL bundled`
+at launch; `tools\publish-update.ps1` refuses to build at all.
 
 **2. Build with signing enabled.** The private key has to be available as an
 environment variable during the build — this is what makes `tauri build` sign
