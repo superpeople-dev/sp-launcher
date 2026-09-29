@@ -529,6 +529,16 @@ fn download_default_dir(state: State<'_, AppState>) -> String {
     format!("{drive}\\Games\\SUPER PEOPLE")
 }
 
+/// Where the game already is in `dir` (or a few folders below it), if it is:
+/// the Download tab then points the Game folder there instead of offering a
+/// download. Off the UI thread, since it reads folders.
+#[tauri::command]
+async fn find_game(dir: String) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || download::find_game(&dir))
+        .await
+        .unwrap_or(None)
+}
+
 // ------------------------------------------------------------------ entry ---
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -649,6 +659,7 @@ pub fn run() {
             download_pause,
             download_cancel,
             download_default_dir,
+            find_game,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

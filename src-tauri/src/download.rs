@@ -323,6 +323,18 @@ impl Ctx {
 }
 
 async fn run(ctx: &Ctx, mut saved: Saved) -> std::result::Result<(), Stop> {
+    // ---- already there -------------------------------------------------
+    // The game is already in this folder (a copy the player had, or an
+    // earlier install): nothing to fetch. Not while a download of its own is
+    // waiting here to be finished -- a half-unpacked archive can look like an
+    // install.
+    if !saved.verified && !part_path(&ctx.dir).exists() {
+        if let Some(root) = find_install_root(&ctx.dir) {
+            finish(ctx, &root, "The game is already in this folder: nothing to download.");
+            return Ok(());
+        }
+    }
+
     // ---- checking ------------------------------------------------------
     ctx.emit();
     let client = reqwest::Client::builder()
@@ -386,9 +398,14 @@ async fn run(ctx: &Ctx, mut saved: Saved) -> std::result::Result<(), Stop> {
     let root = extract(ctx, &part, saved.total).await?;
 
     // ---- done ----------------------------------------------------------
-    // Point the launcher at the new install. The frontend re-reads the config
-    // on `download:installed`, so its debounced writer cannot put the old
-    // folder back.
+    finish(ctx, &root, "Installed. The archive was deleted to free the space again.");
+    Ok(())
+}
+
+/// Point the launcher at a finished install and report it done. The frontend
+/// re-reads the config on `download:installed`, so its debounced writer cannot
+/// put the old folder back.
+fn finish(ctx: &Ctx, root: &Path, message: &str) {
     let root_str = root.to_string_lossy().into_owned();
     if let Some(state) = ctx.app.try_state::<crate::AppState>() {
         let mut cfg = state.config.lock().expect("config mutex");
@@ -403,10 +420,9 @@ async fn run(ctx: &Ctx, mut saved: Saved) -> std::result::Result<(), Stop> {
         s.eta_secs = None;
         s.done = s.total;
         s.install_dir = root_str.clone();
-        s.message = "Installed. The archive was deleted to free the space again.".into();
+        s.message = message.into();
     });
     let _ = ctx.app.emit("download:installed", root_str);
-    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -875,13 +891,31 @@ fn flatten_into(root: &Path, target: &Path) -> PathBuf {
     target.to_path_buf()
 }
 
+/// Where the game already is in `dir` (or a few folders below it), for the
+/// Download tab: a folder that has it needs no download.
+pub fn find_game(dir: &str) -> Option<String> {
+    let path = Path::new(dir.trim());
+    if dir.trim().is_empty() || !path.is_dir() {
+        return None;
+    }
+    find_install_root(path).map(|p| p.to_string_lossy().into_owned())
+}
+
 /// The folder that holds the game (the archive may wrap it in one or two
-/// folders of its own). Breadth-first, four levels deep, skipping our temp dir.
+/// folders of its own). Breadth-first, four levels deep, skipping our temp dir,
+/// and at most MAX_SCAN folders: a whole drive typed into the folder box must
+/// not turn into minutes of disk crawling.
 fn find_install_root(dir: &Path) -> Option<PathBuf> {
+    const MAX_SCAN: usize = 4000;
+    let mut seen = 0;
     let mut level = vec![dir.to_path_buf()];
     for _ in 0..5 {
         let mut next = Vec::new();
         for d in level {
+            seen += 1;
+            if seen > MAX_SCAN {
+                return None;
+            }
             if crate::game::detect(&d.to_string_lossy()).installed {
                 return Some(d);
             }
@@ -1075,5 +1109,34 @@ mod tests {
         std::fs::create_dir_all(root.join("Engine")).unwrap();
         std::fs::write(root.join(crate::game::GAME_EXE), b"x").unwrap();
         assert_eq!(find_install_root(tmp.path()), Some(root));
+    }
+
+    #[test]
+    fn find_game_answers_for_the_download_tab() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_string_lossy().into_owned();
+        assert_eq!(find_game(""), None, "no folder");
+        assert_eq!(find_game(&format!("{dir}/nowhere")), None, "a folder that doesn't exist");
+        assert_eq!(find_game(&dir), None, "an empty folder");
+
+        let root = tmp.path().join("SUPER PEOPLE");
+        std::fs::create_dir_all(root.join("BravoHotelGame")).unwrap();
+        std::fs::create_dir_all(root.join("Engine")).unwrap();
+        std::fs::write(root.join(crate::game::GAME_EXE), b"x").unwrap();
+        assert_eq!(find_game(&format!("  {dir}  ")), Some(root.to_string_lossy().into_owned()));
+    }
+
+    #[test]
+    fn the_scan_gives_up_on_a_huge_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..4100 {
+            std::fs::create_dir(tmp.path().join(format!("d{i}"))).unwrap();
+        }
+        // The game sits past the limit: not found, rather than a long crawl.
+        let deep = tmp.path().join("d4099").join("SUPER PEOPLE");
+        std::fs::create_dir_all(deep.join("BravoHotelGame")).unwrap();
+        std::fs::create_dir_all(deep.join("Engine")).unwrap();
+        std::fs::write(deep.join(crate::game::GAME_EXE), b"x").unwrap();
+        assert_eq!(find_install_root(tmp.path()), None);
     }
 }
