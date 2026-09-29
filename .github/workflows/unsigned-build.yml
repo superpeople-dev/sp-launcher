@@ -1,7 +1,17 @@
 name: Unsigned Windows build
 
+# Every push to main and every pull request builds and tests the launcher, so a
+# ready unsigned build is always there (Actions -> run -> Artifacts). Releases
+# stay manual: they are signed by Alice alone.
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: unsigned-build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
