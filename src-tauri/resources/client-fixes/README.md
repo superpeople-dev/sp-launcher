@@ -1,4 +1,4 @@
-# Current-build HUD adaptation
+# Current-build client fixes PAK
 
 Contains current 1.3.0.473797 UW-MainWidget and UW-TopInfoWidget package pairs,
 the localized BP-CheatWidget, and the community menu fixes. The cheat widget
@@ -25,11 +25,13 @@ Serialization checks preserve the source property schema. Stance Visibility
 must use EnumProperty; a ByteProperty substitution leaves trailing data and
 causes the game to reject the package.
 
-The signed PAK is 434,883 bytes, Oodle Kraken, Normal, 64 KiB blocks. All six
-payloads, compression blocks and encrypted indices pass read-back verification.
-payload-report.json records hashes; GitHub Actions verifies packaged hashes and
-runs the DLL's signature validation before building. No binary parts or private
-signing key are included.
+The signed PAK contains the 81 base payloads and a cooked
+`BP-LobbyWidget_Web` pair for the standalone Bot Game button. The button is
+anchored at the lower right and displays "50 Bots - Random Blue Zone" beneath
+its title. The user confirmed the final layout and red style in the lobby.
+The button's click path calls `StartStandalonePlay` on the login game mode.
+`payload-report.json` records the 83-file archive and matching PAK/signature
+hashes; the private signing key is not packaged.
 
 Enable Apply client fixes to deploy the signed pair for the game session.
 The prior left/right layout was confirmed in game. These final adjustments
