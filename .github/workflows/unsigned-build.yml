@@ -22,9 +22,13 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      # Both Cargo projects: the lifecycle tests are a separate workspace with
+      # their own target folder, and recompiled from scratch without this.
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            src-tauri
+            tools/client-fixes-tests
 
       - name: Verify bundled ClientFixes resources
         run: node tools/verify-clientfixes-resources.mjs
