@@ -29,10 +29,6 @@ await setJson("src-tauri/tauri.conf.json", (conf) => {
 await setJson("package.json", (pkg) => {
   pkg.version = version;
 });
-await setJson("package-lock.json", (lock) => {
-  lock.version = version;
-  if (lock.packages?.[""]) lock.packages[""].version = version;
-});
 
 // Only the [package] table's version, not a dependency's.
 const cargoPath = "src-tauri/Cargo.toml";

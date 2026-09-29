@@ -100,7 +100,7 @@ if (-not $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
 # --- 3. build --------------------------------------------------------------
 Write-Host ''
 Write-Host 'Building...' -ForegroundColor Cyan
-npm run tauri build
+bun run tauri build
 if ($LASTEXITCODE -ne 0) { throw 'build failed' }
 
 $bundle = 'src-tauri\target\release\bundle\nsis'

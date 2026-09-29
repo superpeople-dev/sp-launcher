@@ -15,16 +15,17 @@ You need Rust and the C++ build tools once per machine:
 1. Install Rust via [rustup](https://rustup.rs).
 2. Install Visual Studio Build Tools with the "Desktop development with
    C++" workload (Tauri links against it on Windows).
-3. Install the Node dependencies:
+3. Install [Bun](https://bun.sh) (`powershell -c "irm bun.sh/install.ps1 | iex"`)
+   and Node.js, then the dependencies:
 
    ```powershell
-   npm install
+   bun install
    ```
 
 ## Running it while developing
 
 ```powershell
-npm run tauri dev
+bun run tauri dev
 ```
 
 The first run compiles the whole Rust dependency tree, which takes a few
@@ -35,7 +36,7 @@ when you save a `.rs` file.
 ## Building the installer
 
 ```powershell
-npm run tauri build
+bun run tauri build
 ```
 
 This produces a release build of both the Rust backend and the frontend,
@@ -86,7 +87,7 @@ ready to go live with the actual 28 GB.
      cd src-tauri
      cargo clean
      cd ..
-     npm run tauri build
+     bun run tauri build
      ```
 
      (Slower than an incremental build, but guarantees the new icon is

@@ -3,7 +3,7 @@
  * Build the `latest.json` the launcher's auto-updater polls (see
  * `plugins.updater.endpoints` in src-tauri/tauri.conf.json).
  *
- * Run this after `npm run tauri build` with the signing env vars set (see
+ * Run this after `bun run tauri build` with the signing env vars set (see
  * RUNNING.md's "Setting up the auto-updater" section) — the build produces
  * both the NSIS installer and a `.sig` file next to it. This script just
  * bundles the version, the signature, and the installer's hosted URL into

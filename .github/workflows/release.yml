@@ -93,11 +93,18 @@ jobs:
           path: _deps/sp-listen-patch
           persist-credentials: false
 
+      # Bun installs the packages and runs the scripts (its version: package.json,
+      # packageManager); Node still runs the tools/*.mjs scripts and the CLIs'
+      # own launchers (vite, tsc, tauri).
       - uses: actions/setup-node@v4
         if: steps.version.outputs.skip != 'true'
         with:
           node-version: '22'
-          cache: npm
+
+      - uses: oven-sh/setup-bun@v2
+        if: steps.version.outputs.skip != 'true'
+        with:
+          bun-version-file: package.json
 
       - uses: dtolnay/rust-toolchain@stable
         if: steps.version.outputs.skip != 'true'
@@ -113,7 +120,7 @@ jobs:
 
       - name: Install frontend dependencies
         if: steps.version.outputs.skip != 'true'
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: Set the version
         if: steps.version.outputs.skip != 'true'
@@ -181,7 +188,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           # The current key has none; set anyway so Tauri never asks for one.
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri build
+        run: bun run tauri build
 
       - name: Prepare the release files
         if: steps.version.outputs.skip != 'true'
