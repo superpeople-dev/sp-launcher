@@ -4,9 +4,13 @@ version = "0.3.3"
 description = "SUPER PEOPLE Launcher"
 edition = "2021"
 
+# Only the rlib that main.rs links. The Tauri template also lists "staticlib"
+# and "cdylib", which only mobile builds use: on Windows they made every build
+# write an unused DLL and a 1 GB .lib (dev) and optimize the whole program two
+# extra times (release).
 [lib]
 name = "sp_launcher_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -46,9 +50,11 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Securit
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 
+# Thin LTO with parallel codegen: a clean release build takes ~1m20s instead of
+# ~3m15s (28-core PC), for a .exe ~140 KB bigger once compressed. Fat LTO with
+# codegen-units = 1 ran the final optimization on a single core.
 [profile.release]
-codegen-units = 1
-lto = true
+lto = "thin"
 opt-level = 3
 panic = "abort"
 strip = true
