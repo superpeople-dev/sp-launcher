@@ -2,6 +2,7 @@
 #include <bcrypt.h>
 
 #include "custom_pak_signing.hpp"
+#include "standalone_options.hpp"
 
 #include <array>
 #include <atomic>
@@ -719,6 +720,22 @@ DWORD WINAPI RunFirstBlood(LPVOID imageBase) {
     }
 }
 
+// Runs on the game thread after the blue zone hook called the original; not
+// while threads are suspended, so allocation is fine here.
+void ReportBlueZoneRow(std::int32_t selected, std::uint32_t comparison, std::uint32_t number) {
+    const auto base=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    std::string name;
+    wchar_t message[192];
+    if (!Name(base, comparison, name))
+        swprintf_s(message, L"Blue zone: selected index %d\r\n", selected);
+    else if (number) // FName instance numbers are the trailing "_N" plus one.
+        swprintf_s(message, L"Blue zone: selected index %d (%S_%02u)\r\n",
+                   selected, name.c_str(), number - 1);
+    else
+        swprintf_s(message, L"Blue zone: selected index %d (%S)\r\n", selected, name.c_str());
+    Log(message);
+}
+
 // Start after DllMain returns. The console appears before hash verification so
 // an unsupported build reports why no fix started. Capsules and First Blood
 // use their own workers. This thread tracks
@@ -736,6 +753,12 @@ DWORD WINAPI Run(LPVOID) {
     }
     Log(L"Supported build. Starting client fixes...\r\n");
     const auto base=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    // Bot-match patches are silent except for the selected blue zone. Each one
+    // verifies the exact bytes first and leaves the game unchanged on any mismatch.
+    (void)standalone_options::Install(base);
+    (void)standalone_options::InstallRate(base);
+    (void)standalone_options::InstallAiTimer(base);
+    (void)standalone_options::InstallBlueZone(base,ReportBlueZoneRow);
     if (!clientfixes_signing::Install(base,Log))
         Log(L"Client fixes: PAK initialization failed.\r\n");
     HANDLE capsuleThread=CreateThread(nullptr,0,RunCapsules,
@@ -798,7 +821,7 @@ DWORD WINAPI Run(LPVOID) {
 
 // Exported version marker for identifying which DLL was embedded. This number
 // advances when a fix is added; the launcher does not currently branch on it.
-extern "C" __declspec(dllexport) unsigned int SPClientFixesVersion() { return 12; }
+extern "C" __declspec(dllexport) unsigned int SPClientFixesVersion() { return 17; }
 
 // DllMain runs under the Windows loader lock. Only disable thread callbacks
 // and start the bootstrap worker here; do not hash files, scan UObjects, wait

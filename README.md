@@ -38,6 +38,8 @@ Rust backend. Windows only.
   - **Local class selection:** allows players to choose a class in local games.
   - **Super Capsules:** allows White and Gold Super Capsules to work when used.
   - **First Blood:** plays the announcement once per local match.
+  - **Standalone bot matches:** requests 50 AI players with a 0.5-second spawn
+    timer and adjusted startup settings for the signed PAK's Bot Game button.
   - **Cheat Widget:** translates its Korean command labels to English.
 - **Engine.ini patch.** Before each launch, `n.VerifyPeer=False` and related
   settings are applied (`src-tauri/src/engine_ini.rs`).

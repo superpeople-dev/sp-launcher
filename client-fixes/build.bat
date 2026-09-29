@@ -25,7 +25,7 @@ if errorlevel 1 (
 if not exist build mkdir build
 echo Building SPClientFixes.dll ...
 cl /nologo /LD /O2 /EHsc /std:c++20 /DNDEBUG /DWIN32_LEAN_AND_MEAN /DNOMINMAX ^
-   src\client_fixes.cpp src\custom_pak_signing.cpp /Fo:build\ /Fe:build\SPClientFixes.dll /link bcrypt.lib
+   src\client_fixes.cpp src\custom_pak_signing.cpp src\standalone_options.cpp /Fo:build\ /Fe:build\SPClientFixes.dll /link bcrypt.lib
 if errorlevel 1 ( echo. & echo [ERROR] Build failed. & pause & exit /b 1 )
 
 if not exist ..\src-tauri\resources mkdir ..\src-tauri\resources
