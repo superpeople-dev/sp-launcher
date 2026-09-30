@@ -1,14 +1,20 @@
 import { useMemo, useState } from "react";
 import { day } from "../../lib/community";
-import type { Person } from "../../types";
+import type { Profile } from "../../types";
 import { ItemDetail } from "./ItemDetail";
 import { useBoard } from "./useBoard";
 
 const PAGE = 5;
 
 /** The latest finished work, newest first: five at a time. */
-export function CompletedPanel({ me, onError }: { me: Person; onError: (message: string) => void }) {
-  const { items, vote, replace } = useBoard("completed", onError);
+interface Props {
+  me: Profile;
+  onError: (message: string) => void;
+  onNotice: (message: string) => void;
+}
+
+export function CompletedPanel({ me, onError, onNotice }: Props) {
+  const { items, vote, replace, remove } = useBoard("completed", onError);
   const [shown, setShown] = useState(PAGE);
   const [open, setOpen] = useState<string | null>(null);
 
@@ -64,7 +70,19 @@ export function CompletedPanel({ me, onError }: { me: Person; onError: (message:
       {current && (
         <div className="sheet" onMouseDown={() => setOpen(null)}>
           <div onMouseDown={(e) => e.stopPropagation()}>
-            <ItemDetail item={current} me={me} onVote={vote} onCommented={replace} onError={onError} onClose={() => setOpen(null)} />
+            <ItemDetail
+              item={current}
+              me={me}
+              onVote={vote}
+              onChange={replace}
+              onGone={(item) => {
+                remove(item);
+                setOpen(null);
+              }}
+              onError={onError}
+              onNotice={onNotice}
+              onClose={() => setOpen(null)}
+            />
           </div>
         </div>
       )}

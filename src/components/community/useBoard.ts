@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { applyVote, cachedItems, castVote, loadItems, storeItems, type Board } from "../../lib/community";
+import { applyVote, cachedItems, castVote, loadItems, onBoard, storeItems, type Board } from "../../lib/community";
 import type { CommunityItem, Vote } from "../../types";
 
 /** A page's items: what the launcher already has at once, then refreshed
@@ -25,6 +25,9 @@ export function useBoard(board: Board, onError: (message: string) => void) {
     };
   }, [board, onError]);
 
+  // Loaded again elsewhere (after an admin moved an item here, say).
+  useEffect(() => onBoard(board, setItems), [board]);
+
   // Votes and new comments made here are kept for the next visit too.
   useEffect(() => {
     if (items) storeItems(board, items);
@@ -32,6 +35,10 @@ export function useBoard(board: Board, onError: (message: string) => void) {
 
   const replace = useCallback((next: CommunityItem) => {
     setItems((list) => list?.map((i) => (i.id === next.id ? next : i)) ?? list);
+  }, []);
+
+  const remove = useCallback((gone: CommunityItem) => {
+    setItems((list) => list?.filter((i) => i.id !== gone.id) ?? list);
   }, []);
 
   const vote = useCallback(
@@ -50,5 +57,5 @@ export function useBoard(board: Board, onError: (message: string) => void) {
     [replace, onError],
   );
 
-  return { items, vote, replace };
+  return { items, vote, replace, remove };
 }

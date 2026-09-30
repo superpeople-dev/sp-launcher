@@ -1,18 +1,24 @@
 import { useState } from "react";
-import type { CommunityItem, ItemStatus, Person } from "../../types";
+import type { CommunityItem, ItemStatus, Profile } from "../../types";
 import { ItemDetail } from "./ItemDetail";
 import { useBoard } from "./useBoard";
 import { VoteControl } from "./VoteControl";
 
 const COLUMNS: { status: ItemStatus; title: string; hint: string }[] = [
-  { status: "in_progress", title: "In progress", hint: "Being worked on now" },
   { status: "planned", title: "Planned", hint: "Up next" },
+  { status: "in_progress", title: "In progress", hint: "Being worked on now" },
 ];
 
 /** What the team works on now and next, as two columns. A card opens its
  * discussion over the board. */
-export function RoadmapPanel({ me, onError }: { me: Person; onError: (message: string) => void }) {
-  const { items, vote, replace } = useBoard("roadmap", onError);
+interface Props {
+  me: Profile;
+  onError: (message: string) => void;
+  onNotice: (message: string) => void;
+}
+
+export function RoadmapPanel({ me, onError, onNotice }: Props) {
+  const { items, vote, replace, remove } = useBoard("roadmap", onError);
   const [open, setOpen] = useState<string | null>(null);
   const current = items?.find((i) => i.id === open) ?? null;
 
@@ -49,8 +55,13 @@ export function RoadmapPanel({ me, onError }: { me: Person; onError: (message: s
               item={current}
               me={me}
               onVote={vote}
-              onCommented={replace}
+              onChange={replace}
+              onGone={(item) => {
+                remove(item);
+                setOpen(null);
+              }}
               onError={onError}
+              onNotice={onNotice}
               onClose={() => setOpen(null)}
             />
           </div>

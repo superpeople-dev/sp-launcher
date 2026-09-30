@@ -48,13 +48,47 @@ pub struct Item {
     pub tags: Vec<Tag>,
     #[serde(default)]
     pub author: Option<Person>,
+    /// Its type and platform tags, which an admin's edit keeps.
+    #[serde(default)]
+    pub type_id: Option<String>,
+    #[serde(default)]
+    pub platform_id: Option<String>,
 }
 
-/// A platform a new idea is filed under (Game, Launcher, ...), by the website's id.
+/// A platform (Game, Launcher, ...) or a type (Bug, Idea, ...), by the website's id.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Platform {
+pub struct Choice {
     pub id: String,
     pub name: String,
+}
+
+/// What a new idea is filed under, and an admin's edit sets.
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+pub struct Meta {
+    pub platforms: Vec<Choice>,
+    pub types: Vec<Choice>,
+}
+
+/// An admin, as the website names them: who an item is assigned to, and who
+/// an admin can assign it to (the id only for admins who manage items).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Member {
+    pub id: Option<String>,
+    pub name: String,
+    pub avatar: Option<String>,
+}
+
+/// An item's discussion, and what an admin sees of it.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Thread {
+    pub comments: Vec<Comment>,
+    /// Comments turned off by an admin: only admins may still post.
+    pub off: bool,
+    /// Whom the item is assigned to; none means the whole team.
+    pub assignee: Option<Member>,
+    /// Whom an admin who manages items can assign it to (empty for others).
+    pub staff: Vec<Member>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -66,6 +100,8 @@ pub struct Comment {
     pub official: bool,
     pub body: String,
     pub created_at: f64,
+    /// Written by the player, who may delete it.
+    pub mine: bool,
     pub replies: Vec<Comment>,
 }
 
@@ -83,12 +119,16 @@ pub struct VoteResult {
 struct ItemsAnswer {
     items: Vec<Item>,
     #[serde(default)]
-    platforms: Vec<Platform>,
+    platforms: Vec<Choice>,
+    #[serde(default)]
+    types: Vec<Choice>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WebAuthor {
+    #[serde(default)]
+    id: Option<String>,
     name: String,
     #[serde(default)]
     avatar: Option<String>,
@@ -105,6 +145,8 @@ struct WebComment {
     #[serde(default)]
     author: Option<WebAuthor>,
     #[serde(default)]
+    mine: bool,
+    #[serde(default)]
     replies: Vec<WebComment>,
 }
 
@@ -117,6 +159,7 @@ impl From<WebComment> for Comment {
             official,
             body: c.body,
             created_at: c.created_at,
+            mine: c.mine,
             replies: c.replies.into_iter().map(Comment::from).collect(),
         }
     }
@@ -126,6 +169,18 @@ impl From<WebComment> for Comment {
 struct CommentsAnswer {
     #[serde(default)]
     comments: Vec<WebComment>,
+    #[serde(default)]
+    off: bool,
+    #[serde(default)]
+    assignee: Option<WebAuthor>,
+    #[serde(default)]
+    staff: Vec<WebAuthor>,
+}
+
+impl From<WebAuthor> for Member {
+    fn from(a: WebAuthor) -> Self {
+        Member { id: a.id, name: a.name, avatar: a.avatar.filter(|s| !s.is_empty()) }
+    }
 }
 
 #[derive(Deserialize)]
@@ -158,6 +213,8 @@ pub fn explain(code: &str) -> String {
         "invalid" => "That could not be posted. Check its length.".into(),
         "offensive" => "That text was refused. Please keep it friendly.".into(),
         "off" => "Comments are closed on this item.".into(),
+        "forbidden" => "You do not have permission to do that.".into(),
+        "missing" => "That comment no longer exists.".into(),
         _ => crate::auth::OOPS.into(),
     }
 }
@@ -185,21 +242,26 @@ fn with(request: reqwest::RequestBuilder, session: Option<&str>) -> reqwest::Req
 }
 
 /// A page's items ("ideas", "roadmap" or "completed") with the player's own
-/// votes, and the platforms a new idea can be filed under.
-pub async fn items(session: Option<&str>, board: &str) -> Result<(Vec<Item>, Vec<Platform>)> {
+/// votes, and the platforms and types an idea can be filed under.
+pub async fn items(session: Option<&str>, board: &str) -> Result<(Vec<Item>, Meta)> {
     if !matches!(board, "ideas" | "roadmap" | "completed") {
         return Err(LauncherError::Message(format!("Unknown page {board}.")));
     }
     let url = format!("{}/api/launcher/items?board={board}", site_url());
     let got: ItemsAnswer = answer(send(with(client()?.get(url), session)).await?).await?;
-    Ok((got.items, got.platforms))
+    Ok((got.items, Meta { platforms: got.platforms, types: got.types }))
 }
 
-pub async fn comments(session: Option<&str>, id: &str) -> Result<Vec<Comment>> {
+pub async fn thread(session: Option<&str>, id: &str) -> Result<Thread> {
     let url = format!("{}/api/roadmap/comments", site_url());
     let request = client()?.get(url).query(&[("feedbackId", id)]);
     let got: CommentsAnswer = answer(send(with(request, session)).await?).await?;
-    Ok(got.comments.into_iter().map(Comment::from).collect())
+    Ok(Thread {
+        comments: got.comments.into_iter().map(Comment::from).collect(),
+        off: got.off,
+        assignee: got.assignee.map(Member::from),
+        staff: got.staff.into_iter().map(Member::from).collect(),
+    })
 }
 
 /// Presses an arrow, as on the website: the arrow already chosen takes the
@@ -246,6 +308,42 @@ pub async fn post_idea(session: &str, title: &str, description: &str, kind: &str
     Ok(())
 }
 
+// ---------------------------------------------------------------- admin ---
+// The website's own admin routes (app/api/admin/feedback, app/api/roadmap/
+// comments), which check the admin's permissions on every call.
+
+/// An admin change to an item: "status" (with status), "edit" (with title,
+/// description, typeId, categoryId), "assign" (with assignee: an admin's id,
+/// or null for the whole team) or "delete".
+pub async fn admin(session: &str, id: &str, mut change: serde_json::Map<String, serde_json::Value>) -> Result<()> {
+    const ALLOWED: [&str; 7] = ["action", "status", "title", "description", "typeId", "categoryId", "assignee"];
+    change.retain(|key, _| ALLOWED.contains(&key.as_str()));
+    if !matches!(change.get("action").and_then(|a| a.as_str()), Some("status" | "edit" | "assign" | "delete")) {
+        return Err(LauncherError::Message("Unknown admin action.".into()));
+    }
+    change.insert("feedbackId".into(), id.into());
+    let url = format!("{}/api/admin/feedback", site_url());
+    let request = client()?.post(url).json(&change);
+    let _: serde_json::Value = answer(send(with(request, Some(session))).await?).await?;
+    Ok(())
+}
+
+/// Turns an item's comments off (only admins may post) or on again.
+pub async fn comments_off(session: &str, id: &str, off: bool) -> Result<()> {
+    let url = format!("{}/api/roadmap/comments", site_url());
+    let request = client()?.patch(url).json(&serde_json::json!({ "feedbackId": id, "off": off }));
+    let _: serde_json::Value = answer(send(with(request, Some(session))).await?).await?;
+    Ok(())
+}
+
+/// Deletes a comment: the player's own, or any for an admin who moderates comments.
+pub async fn delete_comment(session: &str, id: &str, comment_id: &str) -> Result<()> {
+    let url = format!("{}/api/roadmap/comments", site_url());
+    let request = client()?.delete(url).json(&serde_json::json!({ "feedbackId": id, "commentId": comment_id }));
+    let _: serde_json::Value = answer(send(with(request, Some(session))).await?).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +369,7 @@ mod tests {
         let json = r#"{"comments":[{"id":"c1","body":"Fixed next update","createdAt":1,"author":{"name":"Alice","avatar":"","admin":true},
             "replies":[{"id":"r1","body":"Thanks","createdAt":2,"author":{"name":"Gaara"},"replies":[]}]}]}"#;
         let got: CommentsAnswer = serde_json::from_str(json).unwrap();
+        assert!(!got.off && got.assignee.is_none() && got.staff.is_empty(), "a player's view has no admin parts");
         let comments: Vec<Comment> = got.comments.into_iter().map(Comment::from).collect();
         assert!(comments[0].official);
         assert_eq!(comments[0].author.as_ref().unwrap().avatar, None, "an empty picture is no picture");
@@ -278,8 +377,20 @@ mod tests {
     }
 
     #[test]
+    fn an_admin_sees_who_the_item_is_assigned_to_and_whom_to_assign_it_to() {
+        let json = r#"{"comments":[],"off":true,"assignee":{"id":"42","name":"Alice","avatar":"a.png","admin":true},
+            "staff":[{"id":"42","name":"Alice","admin":true},{"id":"43","name":"Riwoter","admin":true}]}"#;
+        let got: CommentsAnswer = serde_json::from_str(json).unwrap();
+        assert!(got.off);
+        let assignee = Member::from(got.assignee.unwrap());
+        assert_eq!(assignee.id.as_deref(), Some("42"));
+        assert_eq!(got.staff.len(), 2);
+    }
+
+    #[test]
     fn refusals_become_sentences() {
         assert!(explain("limit").contains("3 posts"));
+        assert!(explain("forbidden").contains("permission"));
         assert!(explain("offensive").contains("friendly"));
         assert!(explain("reflet").starts_with("Oops"));
     }
