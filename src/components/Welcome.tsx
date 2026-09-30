@@ -46,11 +46,6 @@ export function Welcome({ waiting, error, onConnect, onCancel }: Props) {
             {error}
           </p>
         )}
-
-        <p className="welcome__fine">
-          The launcher only uses your Discord name, picture and roles on the SUPER PEOPLE server. Nothing is posted
-          for you.
-        </p>
       </div>
     </div>
   );
