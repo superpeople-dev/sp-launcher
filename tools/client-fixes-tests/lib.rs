@@ -15,3 +15,6 @@ mod deployment;
 
 #[path = "../../src-tauri/src/engine_ini.rs"]
 mod engine_ini;
+
+#[path = "../../src-tauri/src/client_fixes_startup.rs"]
+mod client_fixes_startup;

@@ -86,7 +86,7 @@ launcher bundles the files of its latest release.
 ### Deployment
 
 Enabled launches deploy all three files for the game session and remove them
-after exit. Disabled launches recover recognized leftovers and inject none of
+after exit. Disabled launches recover recognized leftovers and deploy none of
 them. The launcher records deployed hashes outside the game folder and holds
 an exclusive session lock to recover after interrupted runs. Unknown or
 modified files are preserved and block launch rather than being overwritten.
@@ -94,6 +94,10 @@ The no-Steam fix remains independent. A saved
 `-ExecCmds="PakFile.SearchRecentlyFoundPaks 0"` from older tests is dropped
 from launch arguments because the DLL handles ordered lookup; other
 `-ExecCmds` values are passed through unchanged.
+
+The launcher explicitly sets `SP_CLIENT_FIXES_ENABLED` to `1` or `0` for each child. The no-Steam proxy loads the adjacent fixes DLL only for an enabled launch; there is no remote-thread injection. Fresh session events acknowledge successful DLL bootstrap (supported executable, mandatory PAK hooks and worker startup). Missing, blocked, incompatible or failed startup stops the game; a missing acknowledgement times out after 60 seconds. Object-dependent fixes still activate later as the game's objects appear. This requires proxy v15 and fixes DLL v19 or later; an older bundle cannot acknowledge startup.
+
+To test matching native changes before releasing them, manually run the **Unsigned Windows build** workflow with `native_ref` set to the `sp-native` branch, tag or commit. It builds/tests both DLLs, verifies the existing signed PAK against the new DLL, runs the cross-process startup tests, and embeds the pair. Its artifact includes source commit/hash provenance and the unsigned launcher executable. It does not publish a release or require the launcher signing key.
 
 ## Building
 
