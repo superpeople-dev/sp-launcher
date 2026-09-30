@@ -173,24 +173,40 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
           </p>
         )}
         <div className="field">
+          {/* Installed, the folder is only shown: Open folder opens it in File
+              Explorer. Choosing another folder is for before the download. */}
           <div className="field__row">
             <input
               className="input"
               value={dir}
+              readOnly={ready}
               disabled={active || resumable || removing}
               onChange={(e) => setDir(e.target.value)}
               onBlur={() => dir.trim() && dir.trim() !== installDir && onFolder(dir.trim())}
               spellCheck={false}
             />
-            <button className="btn" type="button" disabled={active || resumable || removing} onClick={() => void browse()}>
-              Browse
-            </button>
+            {ready ? (
+              <button
+                className="btn"
+                type="button"
+                disabled={removing}
+                onClick={() => void invoke("open_install_dir").catch((e) => onError(String(e)))}
+              >
+                Open folder
+              </button>
+            ) : (
+              <button className="btn" type="button" disabled={active || resumable || removing} onClick={() => void browse()}>
+                Browse
+              </button>
+            )}
           </div>
-          <span className={`field__hint${lowSpace ? " is-warn" : ""}`}>
-            {st.free_bytes != null ? `${bytes(st.free_bytes)} free on this drive` : "Free space unknown"}
-            {st.needed_bytes != null ? ` — about ${bytes(st.needed_bytes)} needed while installing` : " — about 64 GB needed while installing"}
-            {". The download is deleted after unpacking."}
-          </span>
+          {!ready && (
+            <span className={`field__hint${lowSpace ? " is-warn" : ""}`}>
+              {st.free_bytes != null ? `${bytes(st.free_bytes)} free on this drive` : "Free space unknown"}
+              {st.needed_bytes != null ? ` — about ${bytes(st.needed_bytes)} needed while installing` : " — about 64 GB needed while installing"}
+              {". The download is deleted after unpacking."}
+            </span>
+          )}
         </div>
       </div>
 
@@ -259,7 +275,7 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
         </div>
         <p className="field__hint" style={{ marginTop: 10 }}>
           {ready
-            ? "Nothing to download: the game is already in this folder. To install it somewhere else, pick an empty folder above."
+            ? "The game is installed in the folder above. Open folder shows it in File Explorer; Uninstall deletes it."
             : "You can close the launcher window while it downloads — it keeps going from the tray, and your PC won't go to sleep. If the launcher is quit or the PC restarts, press Continue to resume where it stopped."}
         </p>
       </div>
