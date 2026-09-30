@@ -594,9 +594,10 @@ html, body, #root{
 /* ============================================================
    PANEL: DOWNLOAD
    ============================================================ */
+/* The game card takes the height left under the Game folder card. */
 .dl{
   grid-template-columns: 1fr;
-  align-content:start;
+  grid-template-rows: auto 1fr;
   gap:12px;
 }
 .card{

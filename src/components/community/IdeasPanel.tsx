@@ -1,15 +1,32 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ago } from "../../lib/community";
 import type { CommunityItem, Person } from "../../types";
+import { Icon, type IconName } from "./Icon";
 import { ItemDetail } from "./ItemDetail";
 import { SuggestDialog } from "./SuggestDialog";
 import { useBoard } from "./useBoard";
 import { VoteControl } from "./VoteControl";
 
-type Kind = "all" | "idea" | "bug";
+type Kind = "all" | "bug" | "idea" | "improvement" | "question";
 type Sort = "top" | "new";
 
-const isBug = (item: CommunityItem) => item.tags.some((t) => /bug/i.test(t.name));
+// The website's types (its first tag), as the dropdown offers them.
+const KINDS: { id: Kind; label: string; icon: IconName }[] = [
+  { id: "all", label: "All types", icon: "all" },
+  { id: "bug", label: "Bugs", icon: "bug" },
+  { id: "idea", label: "Ideas", icon: "idea" },
+  { id: "improvement", label: "Improvements", icon: "improvement" },
+  { id: "question", label: "Questions", icon: "question" },
+];
+const SORTS: { id: Sort; label: string; icon: IconName }[] = [
+  { id: "top", label: "Top", icon: "top" },
+  { id: "new", label: "New", icon: "new" },
+];
+
+const kindOf = (item: CommunityItem): Kind | null => {
+  const name = item.tags[0]?.name.toLowerCase() ?? "";
+  return (["bug", "idea", "improvement", "question"] as Kind[]).find((k) => name.startsWith(k)) ?? null;
+};
 
 /** Ideas and bug reports: the list on the left, the selected one with its
  * comments on the right. */
@@ -27,7 +44,7 @@ export function IdeasPanel({ me, onError, onNotice }: Props) {
   const [suggesting, setSuggesting] = useState(false);
 
   const shown = useMemo(() => {
-    const list = (items ?? []).filter((i) => kind === "all" || (kind === "bug") === isBug(i));
+    const list = (items ?? []).filter((i) => kind === "all" || kindOf(i) === kind);
     return [...list].sort((a, b) => (sort === "top" ? b.score - a.score : b.createdAt - a.createdAt));
   }, [items, kind, sort]);
 
@@ -36,17 +53,12 @@ export function IdeasPanel({ me, onError, onNotice }: Props) {
   return (
     <section className="panel ideas is-active">
       <div className="ideas__bar">
-        <div className="seg" role="tablist" aria-label="Show">
-          {(["all", "idea", "bug"] as Kind[]).map((k) => (
-            <button key={k} type="button" className={`seg__btn${kind === k ? " is-on" : ""}`} onClick={() => setKind(k)}>
-              {k === "all" ? "All" : k === "idea" ? "Ideas" : "Bugs"}
-            </button>
-          ))}
-        </div>
+        <KindPicker value={kind} onChange={setKind} count={(k) => (items ?? []).filter((i) => k === "all" || kindOf(i) === k).length} />
         <div className="seg" role="tablist" aria-label="Sort">
-          {(["top", "new"] as Sort[]).map((s) => (
-            <button key={s} type="button" className={`seg__btn${sort === s ? " is-on" : ""}`} onClick={() => setSort(s)}>
-              {s === "top" ? "Top" : "New"}
+          {SORTS.map((s) => (
+            <button key={s.id} type="button" className={`seg__btn${sort === s.id ? " is-on" : ""}`} onClick={() => setSort(s.id)}>
+              <Icon name={s.icon} />
+              {s.label}
             </button>
           ))}
         </div>
@@ -111,5 +123,56 @@ export function IdeasPanel({ me, onError, onNotice }: Props) {
         />
       )}
     </section>
+  );
+}
+
+/** The type filter: a dropdown of the website's types, with how many of each. */
+function KindPicker({ value, onChange, count }: { value: Kind; onChange: (kind: Kind) => void; count: (kind: Kind) => number }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const current = KINDS.find((k) => k.id === value) ?? KINDS[0];
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => !root.current?.contains(e.target as Node) && setOpen(false);
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+
+  return (
+    <div className={`pick${open ? " is-open" : ""}`} ref={root}>
+      <button type="button" className="pick__btn" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        <Icon name={current.icon} />
+        {current.label}
+        <Icon name="chevron" className="pick__chev" />
+      </button>
+      {open && (
+        <ul className="pick__menu" role="listbox" aria-label="Type">
+          {KINDS.map((k) => (
+            <li key={k.id}>
+              <button
+                type="button"
+                role="option"
+                aria-selected={k.id === value}
+                className={`pick__opt${k.id === value ? " is-on" : ""}`}
+                onClick={() => {
+                  onChange(k.id);
+                  setOpen(false);
+                }}
+              >
+                <Icon name={k.icon} />
+                <span className="pick__label">{k.label}</span>
+                <span className="pick__count">{count(k.id)}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }

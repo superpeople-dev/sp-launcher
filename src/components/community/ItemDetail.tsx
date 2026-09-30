@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { STATUS_LABEL, ago, listComments, postComment } from "../../lib/community";
+import { STATUS_LABEL, ago, cachedComments, loadComments, postComment, storeComments } from "../../lib/community";
 import type { CommunityComment, CommunityItem, CommentReply, Person, Vote } from "../../types";
 import { Avatar } from "./Avatar";
 import { VoteControl } from "./VoteControl";
@@ -18,20 +18,22 @@ interface Props {
 /** One item with its discussion: the Ideas page's right column, and the panel
  * the Roadmap and Completed pages open. */
 export function ItemDetail({ item, me, onVote, onCommented, onError, onClose }: Props) {
-  const [comments, setComments] = useState<CommunityComment[] | null>(null);
+  const [comments, setComments] = useState<CommunityComment[] | null>(() => cachedComments(item.id));
   const [draft, setDraft] = useState("");
   const [posting, setPosting] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
 
+  // Comments seen before show at once, then refresh quietly.
   useEffect(() => {
     let alive = true;
-    setComments(null);
+    const known = cachedComments(item.id);
+    setComments(known);
     setDraft("");
     scroller.current?.scrollTo({ top: 0 });
-    listComments(item.id)
+    loadComments(item.id)
       .then((list) => alive && setComments(list))
       .catch((e) => {
-        if (!alive) return;
+        if (!alive || known) return;
         setComments([]);
         onError(String(e));
       });
@@ -39,6 +41,10 @@ export function ItemDetail({ item, me, onVote, onCommented, onError, onClose }: 
       alive = false;
     };
   }, [item.id, onError]);
+
+  useEffect(() => {
+    if (comments) storeComments(item.id, comments);
+  }, [item.id, comments]);
 
   const send = async () => {
     const body = draft.trim();

@@ -13,6 +13,52 @@ export const listItems = (board: Board) => invoke<CommunityItem[]>("community_it
 
 export const listComments = (id: string) => invoke<CommunityComment[]>("community_comments", { id });
 
+// ------------------------------------------------------------------ cache ---
+// The pages keep what they loaded: opening one again shows it at once and
+// refreshes it quietly. All three are loaded as soon as the player is signed
+// in (App.tsx), so the first visit is instant too. The cache belongs to the
+// signed-in player (their own votes are in it): signing out clears it.
+
+const itemsCache = new Map<Board, CommunityItem[]>();
+const loading = new Map<Board, Promise<CommunityItem[]>>();
+const commentsCache = new Map<string, CommunityComment[]>();
+
+export const cachedItems = (board: Board) => itemsCache.get(board) ?? null;
+export const storeItems = (board: Board, items: CommunityItem[]) => void itemsCache.set(board, items);
+
+/** A board's items, fresh from the website; one request at a time per board. */
+export function loadItems(board: Board): Promise<CommunityItem[]> {
+  let pending = loading.get(board);
+  if (!pending) {
+    pending = listItems(board)
+      .then((items) => {
+        itemsCache.set(board, items);
+        return items;
+      })
+      .finally(() => loading.delete(board));
+    loading.set(board, pending);
+  }
+  return pending;
+}
+
+export function preloadBoards() {
+  for (const board of ["ideas", "roadmap", "completed"] as Board[]) void loadItems(board).catch(() => {});
+}
+
+export const cachedComments = (id: string) => commentsCache.get(id) ?? null;
+export const storeComments = (id: string, comments: CommunityComment[]) => void commentsCache.set(id, comments);
+
+export async function loadComments(id: string) {
+  const comments = await listComments(id);
+  commentsCache.set(id, comments);
+  return comments;
+}
+
+export function clearCommunityCache() {
+  itemsCache.clear();
+  commentsCache.clear();
+}
+
 /** Presses an arrow, as on the website: the arrow already chosen takes the
  * vote back, the other switches it. Answers the vote and score as they are now. */
 export const castVote = (id: string, direction: Vote) =>

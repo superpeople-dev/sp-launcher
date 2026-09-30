@@ -15,6 +15,7 @@ import { RoadmapPanel } from "./components/community/RoadmapPanel";
 import { CompletedPanel } from "./components/community/CompletedPanel";
 import { activeNews } from "./news";
 import { checkForUpdate, installUpdate } from "./lib/updater";
+import { clearCommunityCache, preloadBoards } from "./lib/community";
 import type { AuthState, Config, HostsStatus, InstallState, NewsItem, Phase, Profile, Tab } from "./types";
 
 // Re-check which items are in their [starts_at, ends_at) window every so
@@ -93,6 +94,15 @@ export default function App() {
   useEffect(() => {
     void getVersion().then(setAppVersion);
   }, []);
+
+  // Ideas, Roadmap and Completed load as soon as the player is signed in, so
+  // their tabs open at once. They carry that player's own votes: signing out
+  // drops them.
+  const profileId = profile?.id;
+  useEffect(() => {
+    if (profileId) preloadBoards();
+    else clearCommunityCache();
+  }, [profileId]);
 
   // The launcher opens in front of the other windows. After an update the
   // installer starts it from the background, and Windows would otherwise leave

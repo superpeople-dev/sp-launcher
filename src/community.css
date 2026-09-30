@@ -11,6 +11,9 @@
   --down: #7c9cff;
 }
 
+/* Selected text in the launcher's red, as on the website. */
+::selection{ background: var(--signal); color: #fff; }
+
 /* ---- avatars ---- */
 .avatar{
   flex: 0 0 auto;
@@ -161,11 +164,54 @@
 }
 .account__via svg{ width: 13px; height: 13px; }
 
+/* ---- icons ---- */
+.icon{
+  width: 15px; height: 15px; flex: 0 0 auto;
+  fill: none; stroke: currentColor; stroke-width: 1.9;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+
+/* ---- dropdown: the Ideas page's type filter ---- */
+.pick{ position: relative; }
+.pick__btn{
+  appearance:none;
+  display:inline-flex; align-items:center; gap: 8px;
+  height: 30px; padding: 0 10px 0 11px;
+  border: 1px solid var(--line); background: rgba(5,8,12,0.4);
+  font-family: var(--font); font-size: 12px; font-weight: 800;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--paper); cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+.pick__btn:hover, .pick.is-open .pick__btn{ border-color: rgba(255,255,255,0.28); background: rgba(255,255,255,0.05); }
+.pick__chev{ width: 13px; height: 13px; margin-left: 2px; color: var(--muted); transition: transform .15s ease; }
+.pick.is-open .pick__chev{ transform: rotate(180deg); }
+.pick__menu{
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 40;
+  min-width: 100%; width: 206px; margin: 0; padding: 5px; list-style: none;
+  background: #16161a; border: 1px solid var(--line);
+  box-shadow: 0 18px 44px rgba(0,0,0,0.6);
+  animation: rise .12s ease both;
+}
+.pick__opt{
+  width: 100%; display:flex; align-items:center; gap: 10px;
+  padding: 8px 9px;
+  appearance:none; border: 0; background: transparent; text-align: left;
+  font-family: var(--font); font-size: 12.5px; font-weight: 800;
+  letter-spacing: 0.09em; text-transform: uppercase;
+  color: var(--paper-dim); cursor: pointer;
+}
+.pick__opt:hover{ background: rgba(255,255,255,0.06); color: #fff; }
+.pick__opt.is-on{ color: #fff; background: rgba(239,68,56,0.14); box-shadow: inset 2px 0 0 var(--signal-hi); }
+.pick__label{ flex: 1 1 auto; }
+.pick__count{ font-family: var(--read); font-size: 11.5px; font-weight: 600; letter-spacing: 0; color: var(--muted); }
+
 /* ---- shared bits: segmented control, tags, status, votes ---- */
 .seg{ display:inline-flex; border: 1px solid var(--line); background: rgba(5,8,12,0.4); }
 .seg__btn{
   appearance:none; border:0; background: transparent;
-  padding: 6px 12px;
+  display:inline-flex; align-items:center; gap: 6px;
+  height: 28px; padding: 0 12px;
   font-family: var(--font); font-size: 12px; font-weight: 800;
   letter-spacing: 0.1em; text-transform: uppercase;
   color: var(--muted); cursor: pointer;
@@ -199,7 +245,9 @@
 .vote--row{ flex-direction: row; width:auto; flex: 0 0 auto; gap: 4px; }
 .vote__btn{
   appearance:none; border:0; background: transparent;
-  width: 24px; height: 20px; display:grid; place-items:center;
+  /* No default button padding: it pushed the 16px arrow off-centre. */
+  padding: 0;
+  width: 24px; height: 22px; display:grid; place-items:center;
   color: var(--muted); cursor: pointer; border-radius: 2px;
   transition: color .12s ease, background .12s ease;
 }
@@ -283,6 +331,7 @@
 .detail__close{
   margin-left: auto;
   appearance:none; border: 1px solid var(--line); background: rgba(255,255,255,0.03);
+  padding: 0;
   width: 28px; height: 28px; display:grid; place-items:center;
   color: var(--paper-dim); cursor: pointer;
 }
