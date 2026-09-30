@@ -1,4 +1,5 @@
 mod auth;
+mod community;
 mod config;
 mod client_fixes;
 mod client_fixes_deployment;
@@ -39,7 +40,14 @@ pub struct AppState {
     discord: discord::Presence,
     /// The Download tab's worker state (download.rs).
     download: download::Downloader,
+    /// While the Discord window is open: where its outcome goes (the one-time
+    /// code, or why there is none). See `discord_connect`.
+    signing_in: Arc<Mutex<Option<SignIn>>>,
+    /// The platforms a new idea is filed under, from the last page load.
+    platforms: Mutex<Vec<community::Platform>>,
 }
+
+type SignIn = tokio::sync::oneshot::Sender<std::result::Result<String, String>>;
 
 /// `Window` (handed to `on_window_event`) and `WebviewWindow` (handed back
 /// by `get_webview_window`) have identical hide/show methods but no shared
@@ -107,8 +115,22 @@ fn get_config(state: State<'_, AppState>) -> Config {
 
 #[tauri::command]
 fn set_config(state: State<'_, AppState>, cfg: Config) -> Result<()> {
+    let mut current = state.config.lock().expect("config mutex");
+    // The sign-in belongs to this side (discord_connect, sign_out): the
+    // frontend's copy of the config may be older than a sign-in, and must not
+    // put an old one back or drop a new one.
+    let cfg = Config {
+        session_sealed: current.session_sealed.clone(),
+        profile: current.profile.clone(),
+        device_id: current.device_id.clone(),
+        auth_key_sealed: current.auth_key_sealed.clone(),
+        account_id: current.account_id.clone(),
+        display_name: current.display_name.clone(),
+        key_status: current.key_status.clone(),
+        ..cfg
+    };
     config::save(&state.config_dir, &cfg)?;
-    *state.config.lock().expect("config mutex") = cfg;
+    *current = cfg;
     Ok(())
 }
 
@@ -216,9 +238,9 @@ fn hide_to_tray(app: AppHandle) -> Result<()> {
 
 // ------------------------------------------------------------------ auth ---
 //
-// The key never leaves this file except to go to the backend. It is not
+// The session never leaves this side except to go to the website. It is not
 // returned to the frontend, not logged, and not passed to the game -- what the
-// game gets is a one-time ticket minted at launch.
+// game gets is the backend's one-time ticket, minted at launch.
 
 /// Makes sure this installation has an id, persisting it the first time.
 fn ensure_device_id(state: &State<'_, AppState>) -> Result<String> {
@@ -237,50 +259,207 @@ fn ensure_device_id(state: &State<'_, AppState>) -> Result<String> {
     Ok(id)
 }
 
-#[tauri::command]
-fn auth_status(state: State<'_, AppState>) -> Result<auth::AuthStatus> {
-    let cfg = state.config.lock().expect("config mutex");
-    Ok(auth::AuthStatus {
-        signed_in: !cfg.auth_key_sealed.is_empty(),
-        account_id: cfg.account_id.clone(),
-        display_name: cfg.display_name.clone(),
-        status: cfg.key_status.clone(),
-    })
-}
-
-#[tauri::command]
-async fn redeem_key(state: State<'_, AppState>, key: String) -> Result<auth::AuthStatus> {
-    let device_id = ensure_device_id(&state)?;
-    let normalized = auth::normalize_key(&key);
-
-    let status = auth::redeem(auth::AUTH_BASE_URL, &normalized, &device_id).await?;
-
-    // Only store the key once the backend has accepted it, so a typo never
-    // leaves a dead key sitting in the config.
-    let sealed = auth::seal(&normalized)?;
-    {
-        let mut cfg = state.config.lock().expect("config mutex");
-        cfg.auth_key_sealed = sealed;
-        cfg.account_id = status.account_id.clone();
-        cfg.display_name = status.display_name.clone();
-        cfg.key_status = status.status.clone();
-        config::save(&state.config_dir, &cfg)?;
+/// The saved session, if the player is signed in.
+fn session_of(state: &State<'_, AppState>) -> Result<Option<String>> {
+    let sealed = state.config.lock().expect("config mutex").session_sealed.clone();
+    if sealed.is_empty() {
+        return Ok(None);
     }
-    Ok(status)
+    auth::unseal(&sealed).map(Some)
 }
 
-#[tauri::command]
-fn sign_out(state: State<'_, AppState>) -> Result<()> {
+fn require_session(state: &State<'_, AppState>) -> Result<String> {
+    session_of(state)?.ok_or(LauncherError::SignedOut)
+}
+
+/// Forgets the sign-in on this PC. Also what happens when the website stops
+/// accepting it (`expired`).
+fn forget_sign_in(state: &State<'_, AppState>) -> Result<()> {
     let mut cfg = state.config.lock().expect("config mutex");
+    cfg.session_sealed.clear();
+    cfg.profile = None;
+    // What a launcher key left behind goes too. device_id deliberately
+    // survives: it identifies the installation, not the player.
     cfg.auth_key_sealed.clear();
     cfg.account_id.clear();
     cfg.display_name.clear();
     cfg.key_status.clear();
-    // device_id deliberately survives: it identifies the installation, not the
-    // player, and keeping it means signing back in is not treated as a move to
-    // a new PC.
-    config::save(&state.config_dir, &cfg)?;
-    Ok(())
+    config::save(&state.config_dir, &cfg)
+}
+
+/// Passes an error through; the website refusing the session also signs the
+/// launcher out and sends it back to the welcome screen.
+fn expired(app: &AppHandle, state: &State<'_, AppState>, error: LauncherError) -> LauncherError {
+    if matches!(error, LauncherError::SignedOut) {
+        let _ = forget_sign_in(state);
+        let _ = app.emit("auth:expired", ());
+    }
+    error
+}
+
+#[tauri::command]
+fn auth_status(state: State<'_, AppState>) -> auth::AuthState {
+    let cfg = state.config.lock().expect("config mutex");
+    auth::AuthState {
+        profile: if cfg.session_sealed.is_empty() { None } else { cfg.profile.clone() },
+    }
+}
+
+/// "Connect with Discord": opens the website's launcher sign-in in a window of
+/// its own and waits until the player is through, or closes it. The site ends
+/// on /launcher/connected?code=…; that address is caught here, never loaded,
+/// and the code traded for the session (auth.rs).
+///
+/// The window is a plain web page with no access to the launcher: the app's
+/// capabilities (capabilities/default.json) are for the "main" window only.
+#[tauri::command]
+async fn discord_connect(app: AppHandle, state: State<'_, AppState>) -> Result<auth::Profile> {
+    let pkce = auth::pkce()?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // A new attempt replaces an old one; its waiter hears "cancelled".
+    if let Some(old) = state.signing_in.lock().expect("sign-in mutex").replace(tx) {
+        let _ = old.send(Err("cancelled".into()));
+    }
+    if let Some(open) = app.get_webview_window(DISCORD_WINDOW) {
+        let _ = open.destroy();
+    }
+
+    let sign_in = auth::sign_in_url(&pkce.challenge);
+    // Never a window with an error page in it: a site that cannot sign anyone
+    // in right now is said on the welcome screen instead.
+    if let Err(e) = auth::check_sign_in(&sign_in).await {
+        state.signing_in.lock().expect("sign-in mutex").take();
+        return Err(e);
+    }
+    let url: tauri::Url = sign_in.parse().map_err(|_| LauncherError::Message(auth::OOPS.into()))?;
+    let slot = state.signing_in.clone();
+    let mut builder = tauri::WebviewWindowBuilder::new(&app, DISCORD_WINDOW, tauri::WebviewUrl::External(url))
+        .title("Connect with Discord")
+        .inner_size(500.0, 760.0)
+        .resizable(false)
+        .center()
+        // Private, like an incognito tab: nothing from an earlier sign-in is
+        // remembered, so each one asks for a Discord login (or the Discord
+        // app's approval) afresh, and no Discord session stays on the PC.
+        .incognito(true)
+        .on_navigation(move |url| match auth::read_connected(url.as_str()) {
+            Some(outcome) => {
+                if let Some(tx) = slot.lock().expect("sign-in mutex").take() {
+                    let _ = tx.send(outcome);
+                }
+                false
+            }
+            None => true,
+        });
+    if let Some(main) = app.get_webview_window("main") {
+        builder = builder.parent(&main).map_err(|e| LauncherError::Message(e.to_string()))?;
+    }
+    let window = builder.build().map_err(|_| LauncherError::Message(auth::OOPS.into()))?;
+    let slot = state.signing_in.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::Destroyed = event {
+            if let Some(tx) = slot.lock().expect("sign-in mutex").take() {
+                let _ = tx.send(Err("cancelled".into()));
+            }
+        }
+    });
+
+    let outcome = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
+    if let Some(open) = app.get_webview_window(DISCORD_WINDOW) {
+        let _ = open.destroy();
+    }
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.set_focus();
+    }
+    let code = outcome.map_err(LauncherError::Message)?;
+
+    let (token, profile) = auth::exchange(&code, &pkce.verifier).await?;
+    let sealed = auth::seal(&token)?;
+    forget_sign_in(&state)?;
+    {
+        let mut cfg = state.config.lock().expect("config mutex");
+        cfg.session_sealed = sealed;
+        cfg.profile = Some(profile.clone());
+        config::save(&state.config_dir, &cfg)?;
+    }
+    Ok(profile)
+}
+
+const DISCORD_WINDOW: &str = "discord";
+
+/// The welcome screen's Cancel: closes the Discord window, which ends the wait.
+#[tauri::command]
+fn discord_cancel(app: AppHandle, state: State<'_, AppState>) {
+    if let Some(tx) = state.signing_in.lock().expect("sign-in mutex").take() {
+        let _ = tx.send(Err("cancelled".into()));
+    }
+    if let Some(open) = app.get_webview_window(DISCORD_WINDOW) {
+        let _ = open.destroy();
+    }
+}
+
+#[tauri::command]
+fn sign_out(state: State<'_, AppState>) -> Result<()> {
+    forget_sign_in(&state)
+}
+
+// ------------------------------------------------------------- community ---
+// The Ideas, Roadmap and Completed pages (community.rs).
+
+#[tauri::command]
+async fn community_items(app: AppHandle, state: State<'_, AppState>, board: String) -> Result<Vec<community::Item>> {
+    let session = session_of(&state)?;
+    let (items, platforms) = community::items(session.as_deref(), &board).await.map_err(|e| expired(&app, &state, e))?;
+    if !platforms.is_empty() {
+        *state.platforms.lock().expect("platforms mutex") = platforms;
+    }
+    Ok(items)
+}
+
+/// The platforms a new idea can be filed under, loading them if no page has yet.
+#[tauri::command]
+async fn community_platforms(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<community::Platform>> {
+    let known = state.platforms.lock().expect("platforms mutex").clone();
+    if !known.is_empty() {
+        return Ok(known);
+    }
+    let session = session_of(&state)?;
+    let (_, platforms) = community::items(session.as_deref(), "ideas").await.map_err(|e| expired(&app, &state, e))?;
+    *state.platforms.lock().expect("platforms mutex") = platforms.clone();
+    Ok(platforms)
+}
+
+#[tauri::command]
+async fn community_comments(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Vec<community::Comment>> {
+    let session = session_of(&state)?;
+    community::comments(session.as_deref(), &id).await.map_err(|e| expired(&app, &state, e))
+}
+
+#[tauri::command]
+async fn community_vote(app: AppHandle, state: State<'_, AppState>, id: String, direction: String) -> Result<community::VoteResult> {
+    let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
+    community::vote(&session, &id, &direction).await.map_err(|e| expired(&app, &state, e))
+}
+
+#[tauri::command]
+async fn community_comment(app: AppHandle, state: State<'_, AppState>, id: String, body: String) -> Result<community::Comment> {
+    let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
+    community::comment(&session, &id, &body).await.map_err(|e| expired(&app, &state, e))
+}
+
+#[tauri::command]
+async fn community_post_idea(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    title: String,
+    description: String,
+    kind: String,
+    platform: String,
+) -> Result<()> {
+    let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
+    community::post_idea(&session, &title, &description, &kind, &platform)
+        .await
+        .map_err(|e| expired(&app, &state, e))
 }
 
 // ---------------------------------------------------------------- launch ---
@@ -300,21 +479,22 @@ async fn launch_game(
     let cfg = state.config.lock().expect("config mutex").clone();
     let config_dir = state.config_dir.clone();
 
-    // Mint the login ticket FIRST, before anything with a side effect.
+    // Get the login ticket FIRST, before anything with a side effect.
     //
-    // It is the step most likely to fail -- no key yet, key suspended, backend
-    // down -- and failing here leaves the machine completely untouched: no
-    // Engine.ini edit, no hosts entries, no process. It also means the game is
-    // never started in a state where it cannot log in.
+    // It is the step most likely to fail -- signed out, account suspended,
+    // website or backend down -- and failing here leaves the machine completely
+    // untouched: no Engine.ini edit, no hosts entries, no process. It also means
+    // the game is never started in a state where it cannot log in.
+    //
+    // The website gives this Discord session a two-minute game pass; the
+    // backend checks it, finds the account, and answers with the ticket (and
+    // remembers this launch for the game's own login). See auth.rs.
     let mut env: Vec<(String, String)> = Vec::new();
-    if cfg.auth_key_sealed.is_empty() {
-        return Err(LauncherError::Message(
-            "You are not signed in. Enter your launcher key first -- get one with /authkey in Discord.".into(),
-        ));
-    }
     {
-        let key = auth::unseal(&cfg.auth_key_sealed)?;
-        let ticket = auth::mint_ticket(auth::AUTH_BASE_URL, &key, &cfg.device_id).await?;
+        let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
+        let device_id = ensure_device_id(&state)?;
+        let pass = auth::game_pass(&session).await.map_err(|e| expired(&app, &state, e))?;
+        let ticket = auth::discord_launch(&pass, &device_id).await?;
         if cfg.debug_logging {
             // The lifetime, never the token. A ticket in a log file is a ticket
             // someone else can use for the next minute.
@@ -604,6 +784,8 @@ pub fn run() {
                 running_pid: Arc::new(Mutex::new(None)),
                 discord: discord::Presence::start(),
                 download: downloader,
+                signing_in: Arc::new(Mutex::new(None)),
+                platforms: Mutex::new(Vec::new()),
             });
 
             // Tray icon: reuses the app's own bundled icon rather than
@@ -679,8 +861,15 @@ pub fn run() {
             launch_game,
             stop_game,
             auth_status,
-            redeem_key,
+            discord_connect,
+            discord_cancel,
             sign_out,
+            community_items,
+            community_platforms,
+            community_comments,
+            community_vote,
+            community_comment,
+            community_post_idea,
             server_status,
             download_status,
             download_start,

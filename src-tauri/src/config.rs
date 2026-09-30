@@ -42,17 +42,22 @@ pub struct Config {
     /// Show the client fixes DLL's diagnostic console when it is loaded.
     pub client_fixes_debug_window: bool,
 
-    // --- key login (see auth.rs) -------------------------------------------
-    /// The launcher key, encrypted with DPAPI and hex-encoded. Never the key
-    /// itself: this file sits in a readable folder, and the key is the one
-    /// long-lived credential a player has.
-    pub auth_key_sealed: String,
-    /// Identifies this installation so the backend can bind the key to it.
-    /// A label, not a secret -- generated once, then left alone.
+    // --- Discord sign-in (see auth.rs) ---------------------------------------
+    /// The website session, encrypted with DPAPI and hex-encoded: this file
+    /// sits in a readable folder, and the session is a 30-day credential.
+    /// Owned by the Rust side: `set_config` never takes it from the frontend.
+    pub session_sealed: String,
+    /// The Discord profile the session belongs to, for drawing the launcher
+    /// without asking the website first. Grants nothing.
+    pub profile: Option<crate::auth::Profile>,
+    /// Identifies this installation to the backend. A label, not a secret --
+    /// generated once, then left alone.
     pub device_id: String,
-    /// Shown in the UI so it does not have to ask the backend just to draw the
-    /// signed-in state. The backend re-checks on every launch regardless, so a
-    /// stale value here can never grant anything.
+
+    // --- launcher keys, retired --------------------------------------------
+    /// What a launcher key sign-in left behind; cleared when Discord is
+    /// connected or on sign-out.
+    pub auth_key_sealed: String,
     pub account_id: String,
     pub display_name: String,
     pub key_status: String,
@@ -73,6 +78,8 @@ impl Default for Config {
             // and fail closed on any other EXE. Players can still switch it off.
             client_fixes_enabled: true,
             client_fixes_debug_window: false,
+            session_sealed: String::new(),
+            profile: None,
             auth_key_sealed: String::new(),
             device_id: String::new(),
             account_id: String::new(),

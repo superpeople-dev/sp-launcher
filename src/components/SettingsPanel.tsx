@@ -1,5 +1,7 @@
 import type { Update } from "@tauri-apps/plugin-updater";
-import type { AuthStatus, Config, HostsStatus } from "../types";
+import type { Config, HostsStatus, Profile } from "../types";
+import { Avatar } from "./community/Avatar";
+import { DISCORD_PATH } from "./Welcome";
 import { pickInstallFolder } from "../lib/browse";
 
 interface Props {
@@ -16,7 +18,7 @@ interface Props {
   updateChecked: boolean;
   updateError: string | null;
   onCheckUpdate: () => void;
-  auth: AuthStatus | null;
+  profile: Profile | null;
   onSignOut: () => void;
 }
 
@@ -39,7 +41,7 @@ export function SettingsPanel({
   updateChecked,
   updateError,
   onCheckUpdate,
-  auth,
+  profile,
   onSignOut,
 }: Props) {
   const needsSetup = config.hosts_redirect && hosts && !hosts.applied;
@@ -54,38 +56,32 @@ export function SettingsPanel({
       <div className="card">
         <h2 className="card__title">Account</h2>
 
-        {auth && auth.signed_in ? (
+        {profile ? (
           <>
-            <div className="field">
-              <span className="field__label">Signed in as</span>
-              <span className="field__hint">
-                {auth.display_name || auth.account_id || "your account"}
-                {auth.status && auth.status !== "active" ? ` — key ${auth.status}` : ""}
+            <div className="account">
+              <Avatar person={profile} size={44} />
+              <div className="account__who">
+                <span className="account__name">{profile.name}</span>
+                <span className="account__user">@{profile.username}</span>
+              </div>
+              <span className="account__via">
+                <svg viewBox="0 0 24 24" aria-hidden>
+                  <path d={DISCORD_PATH} fill="currentColor" />
+                </svg>
+                Discord
               </span>
             </div>
-            {auth.status === "suspended" && (
-              <span className="field__hint">
-                Your key is suspended, so the game will not start. A Key Master can lift it in Discord.
-              </span>
-            )}
-            {auth.status === "revoked" && (
-              <span className="field__hint">
-                Your key has been revoked and can no longer be used.
-              </span>
-            )}
-            <div className="field__row" style={{ marginTop: 10 }}>
+            <div className="field__row" style={{ marginTop: 12 }}>
               <button className="btn" type="button" onClick={onSignOut}>
                 Sign out
               </button>
             </div>
             <span className="field__hint" style={{ marginTop: 8, display: "block" }}>
-              Signing out forgets the key on this PC. You can enter it again at any time.
+              Signing out disconnects Discord on this PC. Connect again at any time.
             </span>
           </>
         ) : (
-          <span className="field__hint">
-            Not signed in. Go to the Play tab and enter your launcher key.
-          </span>
+          <span className="field__hint">Not signed in.</span>
         )}
       </div>
 

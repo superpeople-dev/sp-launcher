@@ -193,7 +193,7 @@ html, body, #root{
 .tab{
   position: relative;
   appearance:none; border:0; background:transparent;
-  padding: 0 19px;
+  padding: 0 15px;
   font-family: var(--font);
   font-weight:800; font-size:14.5px;
   letter-spacing:0.10em; text-transform:uppercase;
@@ -481,7 +481,7 @@ html, body, #root{
 }
 .cta:hover{ background: #f4574b; }
 .cta:active{ background: #cf3327; }
-.cta:focus-visible{ outline:2px solid #fff; outline-offset:3px; }
+.cta:focus-visible{ outline:2px solid var(--signal-hi); outline-offset:3px; }
 .cta__inner{
   position:relative; z-index:2; height:100%;
   display:flex; align-items:center; justify-content:space-between;
@@ -581,24 +581,24 @@ html, body, #root{
   border:1px solid var(--line);
   background: rgba(255,255,255,0.05);
   color: var(--paper-dim);
-  transition: background .15s ease, color .15s ease, border-color .15s ease, transform .15s ease;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
 }
 .discord svg{ width:21px; height:21px; }
 .social:hover .social__label{ color: var(--paper); }
+/* Colour only: the button stays where it is. */
 .discord:hover{
   background: #5865f2; border-color:#5865f2; color:#fff;
-  transform: translateY(-2px);
 }
 .discord:focus-visible{ outline:2px solid var(--signal); outline-offset:2px; }
 
 /* ============================================================
    PANEL: DOWNLOAD
    ============================================================ */
+/* The game card takes the height left under the Game folder card. */
 .dl{
   grid-template-columns: 1fr;
-  align-content:start;
+  grid-template-rows: auto 1fr;
   gap:12px;
-  max-width: 640px;
 }
 .card{
   position: relative;
@@ -694,9 +694,7 @@ html, body, #root{
     rgba(16,80,124,0.93) 100%);
   border-color: rgba(255,156,144,0.55);
   color:#fff;
-  box-shadow:
-    inset 0 1px 0 rgba(255,255,255,0.28),
-    0 6px 18px -4px rgba(239,68,56,0.5);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.28);
 }
 .btn--primary:hover{
   background: linear-gradient(165deg,

@@ -1,67 +1,87 @@
-//! Key-based login: redeeming a launcher key, and minting the one-time ticket
-//! the game presents when it starts.
+//! Signing in with Discord, through superpeople.dev, and what Play needs from it.
 //!
 //! THE SHAPE OF THE THING
 //! ---------------------
-//! A player gets a key from the Discord bot (`/authkey`) and enters it here
-//! once. The key is a long-lived credential, so it is stored encrypted at rest
-//! with Windows DPAPI and it never reaches the game process.
+//! The player presses "Connect with Discord". The launcher opens the website's
+//! launcher sign-in in a window of its own (lib.rs `discord_connect`); the site
+//! sends them through Discord and ends on `/launcher/connected?code=…`. The
+//! launcher reads that one-time code from the window's address and trades it,
+//! with the PKCE verifier it made up front, for the player's session: the same
+//! signed session the website uses, 30 days long (sp-website lib/launcher.ts).
 //!
-//! At the moment Play is pressed the launcher swaps that key for a ONE-TIME
-//! TICKET: valid for about a minute, dead after first use, bound to the
-//! account. That ticket is what the game carries, and the backend resolves the
-//! account from it.
+//! That session is stored encrypted at rest with Windows DPAPI. It is what the
+//! launcher shows Ideas/Roadmap/Completed with, votes and comments with
+//! (community.rs), and what it asks the site for a GAME PASS with when Play is
+//! pressed: two minutes, one use, signed by the site. The game backend checks
+//! the pass and lets that Discord account's game account in.
 //!
 //! WHY IT IS BUILT THIS WAY
 //! ------------------------
-//! Everything on the player's machine is attacker-controlled: this launcher,
-//! the game, the shim beside it. So an account id asserted by any of them is a
-//! claim and not proof, and the backend must never trust one. It trusts only a
-//! secret it issued itself. Hence: the permanent key stays here, and what
-//! travels is short-lived, single-use and revocable.
-//!
-//! The consequence for this file: a stolen ticket is worth almost nothing, a
-//! stolen key is worth everything. That is why the key is encrypted at rest and
-//! is never logged, never put on a command line, and never handed to the game.
+//! Everything on the player's machine is attacker-controlled, so nothing here
+//! ever asserts who the player is. Discord tells the website, the website signs
+//! it, and the backend only believes the website's signature. A Discord id
+//! typed or pasted anywhere on this side is worth nothing. The PKCE verifier
+//! makes the one-time code useless to anything else that sees the address.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::error::{LauncherError, Result};
 
-/// Where the backend lives. Fixed rather than configurable, exactly like
-/// `news::FEED_URL`: it is this server's API, and a player pointing the
-/// launcher somewhere else only breaks their own login.
-///
-/// The port must match `http.port` in the backend's config.json.
+/// Where the game backend lives. Fixed, like `news::FEED_URL`: it is this
+/// server's API, and a player pointing the launcher elsewhere only breaks
+/// their own login. The port must match `http.port` in the backend's config.
 pub const AUTH_BASE_URL: &str = "http://64.226.112.204:8080/launcher/api";
 
-/// How long a redeem/ticket call may take before we give up. Short on purpose:
-/// this sits between the player pressing Play and the game starting, so a dead
-/// backend has to fail fast and say so rather than look like a freeze.
+/// The website players sign in with.
+pub const SITE_URL: &str = "https://superpeople.dev";
+
+/// The site, or in a debug build a local copy of it (`SP_SITE_URL`, e.g.
+/// http://localhost:3000, the other address Discord accepts). A release build
+/// only ever talks to superpeople.dev.
+pub fn site_url() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(url) = std::env::var("SP_SITE_URL") {
+        if !url.trim().is_empty() {
+            return url.trim().trim_end_matches('/').to_string();
+        }
+    }
+    SITE_URL.to_string()
+}
+
+/// How long a call may take before we give up. Short on purpose: these sit
+/// between the player and the game, so a dead server has to fail fast and say
+/// so rather than look like a freeze.
 const TIMEOUT_SECS: u64 = 10;
 
 // ---------------------------------------------------------------- types ---
 
-/// What the UI needs to know about the current sign-in. Deliberately does NOT
-/// carry the key: nothing outside this module ever needs it, and the less it
-/// travels the fewer places it can leak from.
+/// The signed-in player, as Discord knows them. Shown throughout the launcher;
+/// grants nothing (the website checks the session on every call).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
-pub struct AuthStatus {
-    pub signed_in: bool,
-    pub account_id: String,
-    pub display_name: String,
-    /// "active", "suspended" or "revoked" as the backend last reported it.
-    pub status: String,
+pub struct Profile {
+    pub id: String,
+    pub name: String,
+    pub username: String,
+    #[serde(default)]
+    pub avatar: Option<String>,
+}
+
+/// What the UI needs at start, from this PC alone (no network).
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct AuthState {
+    pub profile: Option<Profile>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct RedeemOk {
-    #[serde(default)]
-    account_id: String,
-    #[serde(default)]
-    display_name: String,
-    #[serde(default)]
-    status: String,
+struct TokenOk {
+    token: String,
+    profile: Profile,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PassOk {
+    pass: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -80,7 +100,7 @@ struct ApiError {
     until: Option<String>,
 }
 
-/// A minted ticket, on its way to the game process.
+/// The backend's one-time login ticket, on its way to the game process.
 #[derive(Debug, Clone)]
 pub struct Ticket {
     pub token: String,
@@ -89,48 +109,187 @@ pub struct Ticket {
 
 // --------------------------------------------------------------- errors ---
 
-/// Turns a backend error code into something a player can act on.
-///
-/// The codes are the fixed vocabulary shared with the backend
-/// (`routes/launcher.js`). An unknown one is passed through rather than
-/// swallowed, so a future code is still visible instead of becoming
-/// "something went wrong".
+/// What a player sees when something failed that they cannot act on: never an
+/// HTTP status or an error page.
+pub const OOPS: &str = "Oops, something went wrong. Try again in a moment.";
+
+/// Turns a backend error code into something a player can act on. The codes
+/// are shared with the backend (routes/launcher.js); an unknown one is kept in
+/// brackets for whoever helps them, a bare HTTP status is not.
 pub fn explain(code: &str, until: Option<&str>) -> String {
     match code {
-        "KEY_INVALID" => "That key was not recognised. Check it for typos, or ask in Discord for a new one.".into(),
         "KEY_SUSPENDED" => match until {
-            Some(t) if !t.is_empty() => format!("Your key is temporarily suspended (until {t}). Ask a Key Master in Discord."),
-            _ => "Your key is temporarily suspended. Ask a Key Master in Discord.".into(),
+            Some(t) if !t.is_empty() => format!("Your account is suspended until {t}. Ask a moderator in Discord."),
+            _ => "Your account is suspended. Ask a moderator in Discord.".into(),
         },
-        "KEY_REVOKED" => "Your key has been revoked and cannot be used.".into(),
-        "KEY_ALREADY_BOUND" => "That key is already in use on another PC. A Key Master can release it with /key unbind.".into(),
-        "KEY_NOT_REDEEMED" => "This key has not been set up yet. Enter it again to finish signing in.".into(),
-        "DEVICE_ID_REQUIRED" => "The launcher could not identify this installation. Restart it and try again.".into(),
+        "KEY_REVOKED" | "USER_BLOCKED" => "Your account has been banned from playing.".into(),
+        "NOT_ENABLED" => "The game server does not accept Discord sign-in yet. Try again later.".into(),
+        "PASS_INVALID" | "PASS_EXPIRED" | "PASS_USED" => "The server refused the sign-in pass. Press Play again.".into(),
         "RATE_LIMITED" => "Too many attempts. Wait a minute and try again.".into(),
-        other => format!("Login failed ({other})."),
+        "" => OOPS.into(),
+        other if other.starts_with("HTTP_") => OOPS.into(),
+        other => format!("Oops, something went wrong ({other}). Try again in a moment."),
     }
+}
+
+// ----------------------------------------------------------------- PKCE ---
+
+/// A PKCE pair (RFC 7636, S256): the verifier stays here, the challenge goes
+/// in the sign-in address.
+pub struct Pkce {
+    pub verifier: String,
+    pub challenge: String,
+}
+
+pub fn pkce() -> Result<Pkce> {
+    let mut bytes = [0u8; 32];
+    random::fill(&mut bytes)?;
+    let verifier = base64url(&bytes);
+    let challenge = base64url(&Sha256::digest(verifier.as_bytes()));
+    Ok(Pkce { verifier, challenge })
+}
+
+/// Unpadded base64url: 32 random bytes make a 43-character verifier.
+pub fn base64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for i in 0..chunk.len() + 1 {
+            out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+        }
+    }
+    out
+}
+
+mod random {
+    use crate::error::{LauncherError, Result};
+
+    /// The system's cryptographic generator (BCryptGenRandom).
+    #[cfg(windows)]
+    pub fn fill(buf: &mut [u8]) -> Result<()> {
+        use windows_sys::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
+        let status = unsafe {
+            BCryptGenRandom(std::ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32, BCRYPT_USE_SYSTEM_PREFERRED_RNG)
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(LauncherError::Message(format!("Could not get random bytes (0x{status:08x}).")))
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn fill(buf: &mut [u8]) -> Result<()> {
+        use std::io::Read;
+        std::fs::File::open("/dev/urandom")?.read_exact(buf)?;
+        Ok(())
+    }
+}
+
+// -------------------------------------------------------------- sign-in ---
+
+/// Where the Discord window starts.
+pub fn sign_in_url(challenge: &str) -> String {
+    format!("{}/api/auth/launcher?challenge={challenge}", site_url())
+}
+
+/// The sign-in answers with a redirect on to Discord. Anything else -- the site
+/// down, an older site without the launcher sign-in, sign-in switched off --
+/// would show an error page in the Discord window, so it is checked before the
+/// window opens and said on the welcome screen instead.
+pub async fn check_sign_in(url: &str) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(LauncherError::Http)?;
+    let res = send(client.get(url)).await?;
+    let to = res.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if res.status().is_redirection() && !to.contains("/launcher/connected") {
+        Ok(())
+    } else {
+        Err(LauncherError::Message(OOPS.into()))
+    }
+}
+
+/// What the Discord window's address says once the site is done with it:
+/// `None` while it is anywhere else, the one-time code, or why there is none.
+pub fn read_connected(url: &str) -> Option<std::result::Result<String, String>> {
+    let rest = url.strip_prefix(&format!("{}/launcher/connected", site_url()))?;
+    let query = match rest.as_bytes().first() {
+        None => "",
+        Some(b'?') => &rest[1..],
+        Some(_) => return None,
+    };
+    let code = query.split('&').find_map(|pair| pair.strip_prefix("code="));
+    Some(match code {
+        Some(code) if !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') => Ok(code.to_string()),
+        _ => Err(SIGN_IN_FAILED.into()),
+    })
+}
+
+/// Trades the one-time code (and the verifier behind its challenge) for the
+/// session.
+pub async fn exchange(code: &str, verifier: &str) -> Result<(String, Profile)> {
+    let url = format!("{}/api/launcher/token", site_url());
+    let res = send(client()?.post(url).json(&serde_json::json!({ "code": code, "verifier": verifier }))).await?;
+    if !res.status().is_success() {
+        return Err(LauncherError::Message(SIGN_IN_FAILED.into()));
+    }
+    let ok: TokenOk = res.json().await.map_err(|_| LauncherError::Message(SIGN_IN_FAILED.into()))?;
+    Ok((ok.token, ok.profile))
+}
+
+const SIGN_IN_FAILED: &str = "Oops, the Discord sign-in did not go through. Try again.";
+
+// ------------------------------------------------------------------ Play ---
+
+/// A game pass from the website for this session.
+pub async fn game_pass(session: &str) -> Result<String> {
+    let url = format!("{}/api/launcher/pass", site_url());
+    let res = send(client()?.post(url).bearer_auth(session)).await?;
+    match res.status().as_u16() {
+        200 => Ok(res.json::<PassOk>().await.map_err(|_| LauncherError::Message(OOPS.into()))?.pass),
+        401 => Err(LauncherError::SignedOut),
+        503 => Err(LauncherError::Message(explain("NOT_ENABLED", None))),
+        _ => Err(LauncherError::Message(OOPS.into())),
+    }
+}
+
+/// Hands the pass to the game backend, which answers with the ticket the game
+/// logs in with (and remembers this launch for the game's login).
+pub async fn discord_launch(pass: &str, device_id: &str) -> Result<Ticket> {
+    let url = format!("{AUTH_BASE_URL}/session/discord");
+    let res = send(client()?.post(url).json(&serde_json::json!({ "pass": pass, "device_id": device_id }))).await?;
+    let status = res.status();
+    let text = res.text().await.unwrap_or_default();
+    if status.is_success() {
+        let ok: TicketOk = serde_json::from_str(&text).map_err(|_| LauncherError::Message(OOPS.into()))?;
+        if ok.token.is_empty() {
+            return Err(LauncherError::Message(OOPS.into()));
+        }
+        return Ok(Ticket { token: ok.token, expires_in: ok.expires_in });
+    }
+    let err: ApiError = serde_json::from_str(&text).unwrap_or_default();
+    let code = if err.error.is_empty() { format!("HTTP_{}", status.as_u16()) } else { err.error };
+    Err(LauncherError::Message(explain(&code, err.until.as_deref())))
 }
 
 // ------------------------------------------------------------ http calls ---
 
-fn client() -> Result<reqwest::Client> {
+pub fn client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
         .build()
         .map_err(LauncherError::Http)
 }
 
-/// Shared shape: a 2xx carries the payload, anything else carries `{error}`.
-/// Both are parsed, because a bare status code tells a player nothing.
-async fn post<T: for<'de> Deserialize<'de>>(
-    base: &str,
-    path: &str,
-    body: serde_json::Value,
-) -> Result<T> {
-    let url = format!("{}{}", base.trim_end_matches('/'), path);
-    let res = client()?.post(&url).json(&body).send().await.map_err(|e| {
-        // A connection failure here is the single most common thing a player
-        // will hit, so it gets a plain sentence rather than a reqwest dump.
+/// Sends, turning the failures a player actually hits into plain sentences.
+pub async fn send(request: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+    request.send().await.map_err(|e| {
         if e.is_timeout() {
             LauncherError::Message("The server did not respond. Try again in a moment.".into())
         } else if e.is_connect() {
@@ -138,84 +297,10 @@ async fn post<T: for<'de> Deserialize<'de>>(
         } else {
             LauncherError::Http(e)
         }
-    })?;
-
-    let status = res.status();
-    let text = res.text().await.unwrap_or_default();
-
-    if status.is_success() {
-        return serde_json::from_str::<T>(&text)
-            .map_err(|e| LauncherError::Message(format!("The server sent something unexpected ({e}).")));
-    }
-
-    let err: ApiError = serde_json::from_str(&text).unwrap_or_default();
-    let code = if err.error.is_empty() { format!("HTTP_{}", status.as_u16()) } else { err.error };
-    Err(LauncherError::Message(explain(&code, err.until.as_deref())))
-}
-
-/// First-time sign-in. Binds the key to this installation and creates the
-/// account on the backend if it does not exist yet.
-pub async fn redeem(base: &str, key: &str, device_id: &str) -> Result<AuthStatus> {
-    let key = normalize_key(key);
-    if key.is_empty() {
-        return Err(LauncherError::Message(
-            "That does not look like a key. They look like SP-XXXX-XXXX-XXXX.".into(),
-        ));
-    }
-    let ok: RedeemOk = post(
-        base,
-        "/keys/redeem",
-        serde_json::json!({ "key": key, "device_id": device_id }),
-    )
-    .await?;
-
-    Ok(AuthStatus {
-        signed_in: true,
-        account_id: ok.account_id,
-        display_name: ok.display_name,
-        status: if ok.status.is_empty() { "active".into() } else { ok.status },
     })
 }
 
-/// Called immediately before the game starts. The returned token is good for
-/// one login and about a minute.
-pub async fn mint_ticket(base: &str, key: &str, device_id: &str) -> Result<Ticket> {
-    let ok: TicketOk = post(
-        base,
-        "/session/ticket",
-        serde_json::json!({ "key": key, "device_id": device_id }),
-    )
-    .await?;
-
-    if ok.token.is_empty() {
-        return Err(LauncherError::Message("The server returned an empty login ticket.".into()));
-    }
-    Ok(Ticket { token: ok.token, expires_in: ok.expires_in })
-}
-
-// ------------------------------------------------------------ key format ---
-
-/// Accepts what a player actually pastes: lower case, missing dashes, stray
-/// spaces, a trailing newline from the Discord copy. Returns the canonical
-/// `SP-XXXX-XXXX-XXXX`, or an empty string if it cannot be one.
-pub fn normalize_key(raw: &str) -> String {
-    let cleaned: String = raw
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .map(|c| c.to_ascii_uppercase())
-        .collect();
-
-    if cleaned.len() != 14 || !cleaned.starts_with("SP") {
-        return String::new();
-    }
-    let body = &cleaned[2..];
-    if !body.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return String::new();
-    }
-    format!("SP-{}-{}-{}", &body[0..4], &body[4..8], &body[8..12])
-}
-
-// --------------------------------------------------------- key at rest ---
+// ----------------------------------------------------- secrets at rest ---
 
 /// Hex rather than base64 so there is no dependency for it, and so a config
 /// file is obviously-opaque instead of looking like readable text.
@@ -333,24 +418,24 @@ mod secret {
     }
 }
 
-/// Encrypts a key for storage in the config file.
-pub fn seal(key: &str) -> Result<String> {
-    Ok(to_hex(&secret::protect(key.as_bytes())?))
+/// Encrypts a secret (the Discord session) for storage in the config file.
+pub fn seal(plain: &str) -> Result<String> {
+    Ok(to_hex(&secret::protect(plain.as_bytes())?))
 }
 
-/// Reverses `seal`. Any failure is reported as "sign in again" rather than
-/// being papered over: a key that cannot be decrypted cannot be used.
+/// Reverses `seal`. Any failure means "sign in again": a session that cannot
+/// be decrypted cannot be used.
 pub fn unseal(stored: &str) -> Result<String> {
     let bytes = from_hex(stored)
-        .ok_or_else(|| LauncherError::Message("The stored key is damaged. Please enter it again.".into()))?;
+        .ok_or_else(|| LauncherError::Message("The saved sign-in is damaged. Connect again.".into()))?;
     let plain = secret::unprotect(&bytes)?;
     String::from_utf8(plain)
-        .map_err(|_| LauncherError::Message("The stored key is damaged. Please enter it again.".into()))
+        .map_err(|_| LauncherError::Message("The saved sign-in is damaged. Connect again.".into()))
 }
 
 // -------------------------------------------------------------- device id ---
 
-/// Identifies this installation so a key can be bound to it.
+/// Identifies this installation to the backend (it records it per account).
 ///
 /// Deliberately not cryptographic: it is a label, not a secret, and the
 /// backend treats it as one. Uniqueness is all that is needed, so it is built
@@ -382,22 +467,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_what_a_player_actually_pastes() {
-        let want = "SP-AB12-CD34-EF56";
-        assert_eq!(normalize_key("SP-AB12-CD34-EF56"), want);
-        assert_eq!(normalize_key("sp-ab12-cd34-ef56"), want);
-        assert_eq!(normalize_key("SPAB12CD34EF56"), want);
-        assert_eq!(normalize_key("  SP-AB12-CD34-EF56\n"), want);
-        assert_eq!(normalize_key("SP AB12 CD34 EF56"), want);
+    fn pkce_matches_the_rfc_example() {
+        // RFC 7636, appendix B.
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        assert_eq!(base64url(&Sha256::digest(verifier.as_bytes())), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
     }
 
     #[test]
-    fn rejects_things_that_are_not_keys() {
-        assert_eq!(normalize_key(""), "");
-        assert_eq!(normalize_key("hello"), "");
-        assert_eq!(normalize_key("SP-AB12-CD34"), "");          // too short
-        assert_eq!(normalize_key("SP-AB12-CD34-EF56-78"), "");  // too long
-        assert_eq!(normalize_key("XX-AB12-CD34-EF56"), "");     // wrong prefix
+    fn a_fresh_pkce_pair_is_the_right_shape_and_new_each_time() {
+        let a = pkce().unwrap();
+        let b = pkce().unwrap();
+        assert_eq!(a.verifier.len(), 43);
+        assert_eq!(a.challenge.len(), 43);
+        assert_ne!(a.verifier, b.verifier);
+        assert_eq!(a.challenge, base64url(&Sha256::digest(a.verifier.as_bytes())));
+    }
+
+    #[test]
+    fn base64url_has_no_padding() {
+        assert_eq!(base64url(b"f"), "Zg");
+        assert_eq!(base64url(b"fo"), "Zm8");
+        assert_eq!(base64url(b"foo"), "Zm9v");
+        assert_eq!(base64url(&[0xfb, 0xff]), "-_8");
+    }
+
+    #[test]
+    fn the_connected_page_gives_the_code_and_nothing_else_does() {
+        let site = site_url();
+        assert_eq!(read_connected(&format!("{site}/launcher/connected?code=3f2a-9c")), Some(Ok("3f2a-9c".into())));
+        assert!(matches!(read_connected(&format!("{site}/launcher/connected?error=failed")), Some(Err(_))));
+        assert!(matches!(read_connected(&format!("{site}/launcher/connected")), Some(Err(_))));
+        assert_eq!(read_connected("https://discord.com/oauth2/authorize?x=1"), None);
+        assert_eq!(read_connected(&format!("{site}/api/auth/discord/callback?code=x")), None);
+        assert_eq!(read_connected(&format!("{site}/launcher/connectedX?code=x")), None);
+        // Another site with the same path is not ours.
+        assert_eq!(read_connected("https://evil.example/launcher/connected?code=abc"), None);
+        assert!(matches!(read_connected(&format!("{site}/launcher/connected?code=<script>")), Some(Err(_))));
     }
 
     #[test]
@@ -409,14 +514,14 @@ mod tests {
     }
 
     #[test]
-    fn a_sealed_key_comes_back_out() {
-        let sealed = seal("SP-AB12-CD34-EF56").unwrap();
-        assert_ne!(sealed, "SP-AB12-CD34-EF56", "must not be stored in the clear");
-        assert_eq!(unseal(&sealed).unwrap(), "SP-AB12-CD34-EF56");
+    fn a_sealed_session_comes_back_out() {
+        let sealed = seal("session-token.signature").unwrap();
+        assert_ne!(sealed, "session-token.signature", "must not be stored in the clear");
+        assert_eq!(unseal(&sealed).unwrap(), "session-token.signature");
     }
 
     #[test]
-    fn damaged_storage_asks_for_the_key_again_instead_of_panicking() {
+    fn damaged_storage_asks_to_connect_again_instead_of_panicking() {
         assert!(unseal("not hex at all").is_err());
         assert!(unseal("abc").is_err());
     }
@@ -432,11 +537,14 @@ mod tests {
 
     #[test]
     fn error_codes_become_sentences_a_player_can_act_on() {
-        assert!(explain("KEY_INVALID", None).contains("typos"));
-        assert!(explain("KEY_ALREADY_BOUND", None).contains("another PC"));
         assert!(explain("KEY_SUSPENDED", Some("2026-01-01T00:00:00Z")).contains("2026-01-01"));
         assert!(explain("KEY_SUSPENDED", None).contains("suspended"));
+        assert!(explain("KEY_REVOKED", None).contains("banned"));
+        assert!(explain("PASS_USED", None).contains("Play again"));
         // An unfamiliar code must still be visible, not swallowed.
         assert!(explain("SOME_NEW_CODE", None).contains("SOME_NEW_CODE"));
+        // A bare HTTP status (an error page, a missing route) is never shown.
+        assert_eq!(explain("HTTP_404", None), OOPS);
+        assert!(!explain("HTTP_502", None).contains("502"));
     }
 }
