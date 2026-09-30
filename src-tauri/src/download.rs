@@ -540,7 +540,10 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
 
     // ---- done ----------------------------------------------------------
     let message = if verify {
-        format!("Repaired: {} missing or damaged files were downloaded again.", jobs.len())
+        match jobs.len() {
+            1 => "Repaired: 1 missing or damaged file was downloaded again.".to_string(),
+            n => format!("Repaired: {n} missing or damaged files were downloaded again."),
+        }
     } else {
         format!("Installed. All {} files were checked.", list.files.len())
     };
