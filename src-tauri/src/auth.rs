@@ -71,9 +71,6 @@ pub struct Profile {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct AuthState {
     pub profile: Option<Profile>,
-    /// This PC was signed in with a launcher key: the welcome screen says keys
-    /// are retired and their account comes with their Discord.
-    pub had_key: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,9 +109,13 @@ pub struct Ticket {
 
 // --------------------------------------------------------------- errors ---
 
+/// What a player sees when something failed that they cannot act on: never an
+/// HTTP status or an error page.
+pub const OOPS: &str = "Oops, something went wrong. Try again in a moment.";
+
 /// Turns a backend error code into something a player can act on. The codes
-/// are shared with the backend (routes/launcher.js); an unknown one is passed
-/// through rather than swallowed.
+/// are shared with the backend (routes/launcher.js); an unknown one is kept in
+/// brackets for whoever helps them, a bare HTTP status is not.
 pub fn explain(code: &str, until: Option<&str>) -> String {
     match code {
         "KEY_SUSPENDED" => match until {
@@ -125,7 +126,9 @@ pub fn explain(code: &str, until: Option<&str>) -> String {
         "NOT_ENABLED" => "The game server does not accept Discord sign-in yet. Try again later.".into(),
         "PASS_INVALID" | "PASS_EXPIRED" | "PASS_USED" => "The server refused the sign-in pass. Press Play again.".into(),
         "RATE_LIMITED" => "Too many attempts. Wait a minute and try again.".into(),
-        other => format!("Login failed ({other})."),
+        "" => OOPS.into(),
+        other if other.starts_with("HTTP_") => OOPS.into(),
+        other => format!("Oops, something went wrong ({other}). Try again in a moment."),
     }
 }
 
@@ -193,6 +196,25 @@ pub fn sign_in_url(challenge: &str) -> String {
     format!("{}/api/auth/launcher?challenge={challenge}", site_url())
 }
 
+/// The sign-in answers with a redirect on to Discord. Anything else -- the site
+/// down, an older site without the launcher sign-in, sign-in switched off --
+/// would show an error page in the Discord window, so it is checked before the
+/// window opens and said on the welcome screen instead.
+pub async fn check_sign_in(url: &str) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(LauncherError::Http)?;
+    let res = send(client.get(url)).await?;
+    let to = res.headers().get(reqwest::header::LOCATION).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if res.status().is_redirection() && !to.contains("/launcher/connected") {
+        Ok(())
+    } else {
+        Err(LauncherError::Message(OOPS.into()))
+    }
+}
+
 /// What the Discord window's address says once the site is done with it:
 /// `None` while it is anywhere else, the one-time code, or why there is none.
 pub fn read_connected(url: &str) -> Option<std::result::Result<String, String>> {
@@ -205,7 +227,7 @@ pub fn read_connected(url: &str) -> Option<std::result::Result<String, String>> 
     let code = query.split('&').find_map(|pair| pair.strip_prefix("code="));
     Some(match code {
         Some(code) if !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') => Ok(code.to_string()),
-        _ => Err("Discord did not sign you in. Try again.".into()),
+        _ => Err(SIGN_IN_FAILED.into()),
     })
 }
 
@@ -215,14 +237,13 @@ pub async fn exchange(code: &str, verifier: &str) -> Result<(String, Profile)> {
     let url = format!("{}/api/launcher/token", site_url());
     let res = send(client()?.post(url).json(&serde_json::json!({ "code": code, "verifier": verifier }))).await?;
     if !res.status().is_success() {
-        return Err(LauncherError::Message("The sign-in did not go through. Try again.".into()));
+        return Err(LauncherError::Message(SIGN_IN_FAILED.into()));
     }
-    let ok: TokenOk = res
-        .json()
-        .await
-        .map_err(|e| LauncherError::Message(format!("The website sent something unexpected ({e}).")))?;
+    let ok: TokenOk = res.json().await.map_err(|_| LauncherError::Message(SIGN_IN_FAILED.into()))?;
     Ok((ok.token, ok.profile))
 }
+
+const SIGN_IN_FAILED: &str = "Oops, the Discord sign-in did not go through. Try again.";
 
 // ------------------------------------------------------------------ Play ---
 
@@ -231,14 +252,10 @@ pub async fn game_pass(session: &str) -> Result<String> {
     let url = format!("{}/api/launcher/pass", site_url());
     let res = send(client()?.post(url).bearer_auth(session)).await?;
     match res.status().as_u16() {
-        200 => Ok(res
-            .json::<PassOk>()
-            .await
-            .map_err(|e| LauncherError::Message(format!("The website sent something unexpected ({e}).")))?
-            .pass),
+        200 => Ok(res.json::<PassOk>().await.map_err(|_| LauncherError::Message(OOPS.into()))?.pass),
         401 => Err(LauncherError::SignedOut),
         503 => Err(LauncherError::Message(explain("NOT_ENABLED", None))),
-        other => Err(LauncherError::Message(format!("The website could not start the game (HTTP {other})."))),
+        _ => Err(LauncherError::Message(OOPS.into())),
     }
 }
 
@@ -250,10 +267,9 @@ pub async fn discord_launch(pass: &str, device_id: &str) -> Result<Ticket> {
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
     if status.is_success() {
-        let ok: TicketOk = serde_json::from_str(&text)
-            .map_err(|e| LauncherError::Message(format!("The server sent something unexpected ({e}).")))?;
+        let ok: TicketOk = serde_json::from_str(&text).map_err(|_| LauncherError::Message(OOPS.into()))?;
         if ok.token.is_empty() {
-            return Err(LauncherError::Message("The server returned an empty login ticket.".into()));
+            return Err(LauncherError::Message(OOPS.into()));
         }
         return Ok(Ticket { token: ok.token, expires_in: ok.expires_in });
     }
@@ -527,5 +543,8 @@ mod tests {
         assert!(explain("PASS_USED", None).contains("Play again"));
         // An unfamiliar code must still be visible, not swallowed.
         assert!(explain("SOME_NEW_CODE", None).contains("SOME_NEW_CODE"));
+        // A bare HTTP status (an error page, a missing route) is never shown.
+        assert_eq!(explain("HTTP_404", None), OOPS);
+        assert!(!explain("HTTP_502", None).contains("502"));
     }
 }

@@ -302,7 +302,6 @@ fn auth_status(state: State<'_, AppState>) -> auth::AuthState {
     let cfg = state.config.lock().expect("config mutex");
     auth::AuthState {
         profile: if cfg.session_sealed.is_empty() { None } else { cfg.profile.clone() },
-        had_key: !cfg.auth_key_sealed.is_empty(),
     }
 }
 
@@ -325,15 +324,24 @@ async fn discord_connect(app: AppHandle, state: State<'_, AppState>) -> Result<a
         let _ = open.destroy();
     }
 
-    let url: tauri::Url = auth::sign_in_url(&pkce.challenge)
-        .parse()
-        .map_err(|e| LauncherError::Message(format!("Bad sign-in address ({e}).")))?;
+    let sign_in = auth::sign_in_url(&pkce.challenge);
+    // Never a window with an error page in it: a site that cannot sign anyone
+    // in right now is said on the welcome screen instead.
+    if let Err(e) = auth::check_sign_in(&sign_in).await {
+        state.signing_in.lock().expect("sign-in mutex").take();
+        return Err(e);
+    }
+    let url: tauri::Url = sign_in.parse().map_err(|_| LauncherError::Message(auth::OOPS.into()))?;
     let slot = state.signing_in.clone();
     let mut builder = tauri::WebviewWindowBuilder::new(&app, DISCORD_WINDOW, tauri::WebviewUrl::External(url))
         .title("Connect with Discord")
         .inner_size(500.0, 760.0)
         .resizable(false)
         .center()
+        // Private, like an incognito tab: nothing from an earlier sign-in is
+        // remembered, so each one asks for a Discord login (or the Discord
+        // app's approval) afresh, and no Discord session stays on the PC.
+        .incognito(true)
         .on_navigation(move |url| match auth::read_connected(url.as_str()) {
             Some(outcome) => {
                 if let Some(tx) = slot.lock().expect("sign-in mutex").take() {
@@ -346,7 +354,7 @@ async fn discord_connect(app: AppHandle, state: State<'_, AppState>) -> Result<a
     if let Some(main) = app.get_webview_window("main") {
         builder = builder.parent(&main).map_err(|e| LauncherError::Message(e.to_string()))?;
     }
-    let window = builder.build().map_err(|e| LauncherError::Message(format!("Could not open the Discord window ({e}).")))?;
+    let window = builder.build().map_err(|_| LauncherError::Message(auth::OOPS.into()))?;
     let slot = state.signing_in.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::Destroyed = event {

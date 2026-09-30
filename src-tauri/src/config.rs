@@ -55,8 +55,8 @@ pub struct Config {
     pub device_id: String,
 
     // --- launcher keys, retired --------------------------------------------
-    /// What a launcher key sign-in left behind. Only read to tell the welcome
-    /// screen this PC used a key; cleared when Discord is connected.
+    /// What a launcher key sign-in left behind; cleared when Discord is
+    /// connected or on sign-out.
     pub auth_key_sealed: String,
     pub account_id: String,
     pub display_name: String,

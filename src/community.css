@@ -62,16 +62,6 @@
   font-family: var(--read); font-size: 13.5px; line-height: 1.55;
   color: var(--paper-dim);
 }
-.welcome__notice{
-  margin: -6px 0 18px;
-  padding: 9px 12px;
-  border: 1px solid rgba(240,183,25,0.35);
-  border-left: 3px solid var(--gold);
-  background: rgba(240,183,25,0.06);
-  font-family: var(--read); font-size: 12.5px; line-height: 1.5;
-  color: var(--paper);
-  text-align: left;
-}
 .discordbtn{
   display:inline-flex; align-items:center; gap: 11px;
   height: 48px; padding: 0 26px;

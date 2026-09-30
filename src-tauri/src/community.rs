@@ -158,7 +158,7 @@ pub fn explain(code: &str) -> String {
         "invalid" => "That could not be posted. Check its length.".into(),
         "offensive" => "That text was refused. Please keep it friendly.".into(),
         "off" => "Comments are closed on this item.".into(),
-        _ => "The website could not do that right now. Try again later.".into(),
+        _ => crate::auth::OOPS.into(),
     }
 }
 
@@ -168,8 +168,7 @@ async fn answer<T: for<'de> Deserialize<'de>>(res: reqwest::Response) -> Result<
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
     if status.is_success() {
-        return serde_json::from_str(&text)
-            .map_err(|e| LauncherError::Message(format!("The website sent something unexpected ({e}).")));
+        return serde_json::from_str(&text).map_err(|_| LauncherError::Message(crate::auth::OOPS.into()));
     }
     if status.as_u16() == 401 {
         return Err(LauncherError::SignedOut);
@@ -282,6 +281,6 @@ mod tests {
     fn refusals_become_sentences() {
         assert!(explain("limit").contains("3 posts"));
         assert!(explain("offensive").contains("friendly"));
-        assert!(explain("reflet").contains("Try again later"));
+        assert!(explain("reflet").starts_with("Oops"));
     }
 }

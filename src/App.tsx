@@ -36,7 +36,6 @@ export default function App() {
   // a signed-in player never sees the welcome screen flash by; `null` means
   // not connected, and the welcome screen is all there is.
   const [profile, setProfile] = useState<Profile | null | undefined>(undefined);
-  const [hadKey, setHadKey] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -67,10 +66,7 @@ export default function App() {
       // Read from this PC only (no network), so it answers at once. Failing
       // falls back to the welcome screen rather than an empty window.
       void invoke<AuthState>("auth_status")
-        .then((a) => {
-          setProfile(a.profile);
-          setHadKey(a.had_key);
-        })
+        .then((a) => setProfile(a.profile))
         .catch(() => setProfile(null));
 
       // No folder picker on first start any more: the Play tab's "Get the game"
@@ -287,7 +283,6 @@ export default function App() {
     setAuthError(null);
     try {
       setProfile(await invoke<Profile>("discord_connect"));
-      setHadKey(false);
       setTab("play");
     } catch (e) {
       const message = String(e);
@@ -328,7 +323,6 @@ export default function App() {
           <Welcome
             waiting={connecting}
             error={authError}
-            hadKey={hadKey}
             onConnect={() => void connect()}
             onCancel={() => void invoke("discord_cancel").catch(() => {})}
           />

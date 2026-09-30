@@ -29,8 +29,6 @@ export interface Config {
 /** Mirrors `auth::AuthState`: read from this PC, no network. */
 export interface AuthState {
   profile: Profile | null;
-  /** This PC was signed in with a launcher key before Discord login. */
-  had_key: boolean;
 }
 
 export interface InstallState {
