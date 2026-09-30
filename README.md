@@ -99,6 +99,8 @@ The launcher explicitly sets `SP_CLIENT_FIXES_ENABLED` to `1` or `0` for each ch
 
 To test matching native changes before releasing them, manually run the **Unsigned Windows build** workflow with `native_ref` set to the `sp-native` branch, tag or commit. It builds/tests both DLLs, verifies the existing signed PAK against the new DLL, runs the cross-process startup tests, and embeds the pair. Its artifact includes source commit/hash provenance and the unsigned launcher executable. It does not publish a release or require the launcher signing key.
 
+Unsigned builds use the latest published launcher release's version in the frontend package, Rust crate and Tauri metadata, so the existing release does not immediately trigger an update prompt. The workflow fails if that release cannot be read or its tag is not `vX.Y.Z`/`X.Y.Z`. A subsequent newer release can still trigger an update normally.
+
 ## Building
 
 Prerequisites: [Rust](https://rustup.rs), Visual Studio Build Tools with the

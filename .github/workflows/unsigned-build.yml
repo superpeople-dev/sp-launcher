@@ -34,6 +34,23 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
+
+      # Match the published launcher so the updater does not immediately offer
+      # to replace this test build with the existing signed release.
+      - name: Match the latest released launcher version
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $releaseJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the latest launcher release; refusing to build with a stale version.' }
+          $release = $releaseJson | ConvertFrom-Json
+          $version = $release.tag_name -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Unsupported launcher release tag: $($release.tag_name)" }
+          node tools/set-version.mjs $version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "Unsigned launcher version: $version ($($release.html_url))" >> $env:GITHUB_STEP_SUMMARY
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
