@@ -55,7 +55,13 @@ export interface Profile {
   name: string;
   username: string;
   avatar: string | null;
+  /** A website admin: the admin tools show. The website checks again on every call. */
+  admin: boolean;
+  permissions: Permission[];
 }
+
+/** What a website admin may do (sp-website lib/board.ts). */
+export type Permission = "review" | "manage" | "comments" | "bans";
 
 // ------------------------------------------------------------- community ---
 // The website's Ideas, Roadmap and Completed items (superpeople.dev), as the
@@ -89,6 +95,9 @@ export interface CommunityItem {
   completedAt: number | null;
   tags: ItemTag[];
   author: Person | null;
+  /** Its type and platform, which an admin's edit keeps. */
+  typeId: string | null;
+  platformId: string | null;
 }
 
 export interface CommentReply {
@@ -98,10 +107,36 @@ export interface CommentReply {
   official: boolean;
   body: string;
   createdAt: number;
+  /** Written by the player, who may delete it. */
+  mine: boolean;
 }
 
 export interface CommunityComment extends CommentReply {
   replies: CommentReply[];
+}
+
+/** An admin: whom an item is assigned to, and whom it can be assigned to. */
+export interface Member {
+  id: string | null;
+  name: string;
+  avatar: string | null;
+}
+
+/** An item's discussion, and what an admin sees of it. */
+export interface Thread {
+  comments: CommunityComment[];
+  /** Comments turned off: only admins may still post. */
+  off: boolean;
+  /** Null: the whole team. */
+  assignee: Member | null;
+  /** Whom an admin who manages items can assign it to. */
+  staff: Member[];
+}
+
+/** A platform or a type, by the website's id. */
+export interface Choice {
+  id: string;
+  name: string;
 }
 
 /** Mirrors `download::Status` in src-tauri/src/download.rs — keep the two in step. */

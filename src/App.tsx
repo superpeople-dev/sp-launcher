@@ -66,8 +66,17 @@ export default function App() {
 
       // Read from this PC only (no network), so it answers at once. Failing
       // falls back to the welcome screen rather than an empty window.
+      // Then the website is asked who the player is now (name, picture, admin
+      // rights), quietly: offline, the saved profile stays.
       void invoke<AuthState>("auth_status")
-        .then((a) => setProfile(a.profile))
+        .then((a) => {
+          setProfile(a.profile);
+          if (a.profile) {
+            void invoke<Profile | null>("auth_refresh")
+              .then((fresh) => setProfile((now) => (now ? fresh : now)))
+              .catch(() => {});
+          }
+        })
         .catch(() => setProfile(null));
 
       // No folder picker on first start any more: the Play tab's "Get the game"
@@ -94,6 +103,13 @@ export default function App() {
   useEffect(() => {
     void getVersion().then(setAppVersion);
   }, []);
+
+  // A notice ("Moved to Planned.") says it and goes; clicking it closes it sooner.
+  useEffect(() => {
+    if (!notice) return;
+    const id = window.setTimeout(() => setNotice(null), 5000);
+    return () => window.clearTimeout(id);
+  }, [notice]);
 
   // Ideas, Roadmap and Completed load as soon as the player is signed in, so
   // their tabs open at once. They carry that player's own votes: signing out
@@ -339,8 +355,8 @@ export default function App() {
         )}
 
         {profile && tab === "ideas" && <IdeasPanel me={profile} onError={setError} onNotice={setNotice} />}
-        {profile && tab === "roadmap" && <RoadmapPanel me={profile} onError={setError} />}
-        {profile && tab === "completed" && <CompletedPanel me={profile} onError={setError} />}
+        {profile && tab === "roadmap" && <RoadmapPanel me={profile} onError={setError} onNotice={setNotice} />}
+        {profile && tab === "completed" && <CompletedPanel me={profile} onError={setError} onNotice={setNotice} />}
 
         {profile && tab === "play" && (
           <PlayPanel

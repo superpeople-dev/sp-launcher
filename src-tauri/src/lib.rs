@@ -43,8 +43,8 @@ pub struct AppState {
     /// While the Discord window is open: where its outcome goes (the one-time
     /// code, or why there is none). See `discord_connect`.
     signing_in: Arc<Mutex<Option<SignIn>>>,
-    /// The platforms a new idea is filed under, from the last page load.
-    platforms: Mutex<Vec<community::Platform>>,
+    /// The platforms and types an idea is filed under, from the last page load.
+    meta: Mutex<community::Meta>,
 }
 
 type SignIn = tokio::sync::oneshot::Sender<std::result::Result<String, String>>;
@@ -403,36 +403,51 @@ fn sign_out(state: State<'_, AppState>) -> Result<()> {
     forget_sign_in(&state)
 }
 
+/// The profile as the website sees it now (name, picture, admin rights), saved
+/// for the next start. Called in the background when the launcher opens.
+#[tauri::command]
+async fn auth_refresh(app: AppHandle, state: State<'_, AppState>) -> Result<Option<auth::Profile>> {
+    let Some(session) = session_of(&state)? else { return Ok(None) };
+    let profile = auth::me(&session).await.map_err(|e| expired(&app, &state, e))?;
+    let mut cfg = state.config.lock().expect("config mutex");
+    if !cfg.session_sealed.is_empty() {
+        cfg.profile = Some(profile.clone());
+        config::save(&state.config_dir, &cfg)?;
+    }
+    Ok(Some(profile))
+}
+
 // ------------------------------------------------------------- community ---
 // The Ideas, Roadmap and Completed pages (community.rs).
 
 #[tauri::command]
 async fn community_items(app: AppHandle, state: State<'_, AppState>, board: String) -> Result<Vec<community::Item>> {
     let session = session_of(&state)?;
-    let (items, platforms) = community::items(session.as_deref(), &board).await.map_err(|e| expired(&app, &state, e))?;
-    if !platforms.is_empty() {
-        *state.platforms.lock().expect("platforms mutex") = platforms;
+    let (items, meta) = community::items(session.as_deref(), &board).await.map_err(|e| expired(&app, &state, e))?;
+    if !meta.platforms.is_empty() || !meta.types.is_empty() {
+        *state.meta.lock().expect("meta mutex") = meta;
     }
     Ok(items)
 }
 
-/// The platforms a new idea can be filed under, loading them if no page has yet.
+/// The platforms and types an idea can be filed under, loading them if no
+/// page has yet.
 #[tauri::command]
-async fn community_platforms(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<community::Platform>> {
-    let known = state.platforms.lock().expect("platforms mutex").clone();
-    if !known.is_empty() {
+async fn community_meta(app: AppHandle, state: State<'_, AppState>) -> Result<community::Meta> {
+    let known = state.meta.lock().expect("meta mutex").clone();
+    if !known.platforms.is_empty() {
         return Ok(known);
     }
     let session = session_of(&state)?;
-    let (_, platforms) = community::items(session.as_deref(), "ideas").await.map_err(|e| expired(&app, &state, e))?;
-    *state.platforms.lock().expect("platforms mutex") = platforms.clone();
-    Ok(platforms)
+    let (_, meta) = community::items(session.as_deref(), "ideas").await.map_err(|e| expired(&app, &state, e))?;
+    *state.meta.lock().expect("meta mutex") = meta.clone();
+    Ok(meta)
 }
 
 #[tauri::command]
-async fn community_comments(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<Vec<community::Comment>> {
+async fn community_thread(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<community::Thread> {
     let session = session_of(&state)?;
-    community::comments(session.as_deref(), &id).await.map_err(|e| expired(&app, &state, e))
+    community::thread(session.as_deref(), &id).await.map_err(|e| expired(&app, &state, e))
 }
 
 #[tauri::command]
@@ -460,6 +475,31 @@ async fn community_post_idea(
     community::post_idea(&session, &title, &description, &kind, &platform)
         .await
         .map_err(|e| expired(&app, &state, e))
+}
+
+/// An admin's change to an item (community::admin). The website decides
+/// whether this player may make it.
+#[tauri::command]
+async fn community_admin(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    change: serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
+    community::admin(&session, &id, change).await.map_err(|e| expired(&app, &state, e))
+}
+
+#[tauri::command]
+async fn community_comments_off(app: AppHandle, state: State<'_, AppState>, id: String, off: bool) -> Result<()> {
+    let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
+    community::comments_off(&session, &id, off).await.map_err(|e| expired(&app, &state, e))
+}
+
+#[tauri::command]
+async fn community_delete_comment(app: AppHandle, state: State<'_, AppState>, id: String, comment_id: String) -> Result<()> {
+    let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
+    community::delete_comment(&session, &id, &comment_id).await.map_err(|e| expired(&app, &state, e))
 }
 
 // ---------------------------------------------------------------- launch ---
@@ -796,7 +836,7 @@ pub fn run() {
                 discord: discord::Presence::start(),
                 download: downloader,
                 signing_in: Arc::new(Mutex::new(None)),
-                platforms: Mutex::new(Vec::new()),
+                meta: Mutex::new(community::Meta::default()),
             });
 
             // Tray icon: reuses the app's own bundled icon rather than
@@ -876,8 +916,12 @@ pub fn run() {
             discord_cancel,
             sign_out,
             community_items,
-            community_platforms,
-            community_comments,
+            community_meta,
+            community_thread,
+            community_admin,
+            community_comments_off,
+            community_delete_comment,
+            auth_refresh,
             community_vote,
             community_comment,
             community_post_idea,

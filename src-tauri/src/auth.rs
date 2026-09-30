@@ -65,6 +65,30 @@ pub struct Profile {
     pub username: String,
     #[serde(default)]
     pub avatar: Option<String>,
+    /// A website admin: the launcher shows its admin tools. The website checks
+    /// the permissions again on every admin call, so this only draws buttons.
+    #[serde(default)]
+    pub admin: bool,
+    /// "review", "manage", "comments", "bans" (sp-website lib/board.ts).
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MeOk {
+    profile: Profile,
+}
+
+/// Who the session belongs to now: name, picture and admin rights as the
+/// website sees them today (they change without a new sign-in).
+pub async fn me(session: &str) -> Result<Profile> {
+    let url = format!("{}/api/launcher/me", site_url());
+    let res = send(client()?.get(url).bearer_auth(session)).await?;
+    match res.status().as_u16() {
+        200 => Ok(res.json::<MeOk>().await.map_err(|_| LauncherError::Message(OOPS.into()))?.profile),
+        401 => Err(LauncherError::SignedOut),
+        _ => Err(LauncherError::Message(OOPS.into())),
+    }
 }
 
 /// What the UI needs at start, from this PC alone (no network).
