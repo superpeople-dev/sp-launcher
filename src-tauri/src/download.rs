@@ -1,69 +1,77 @@
-//! The Download tab: fetches the game from archive.org, verifies it, unpacks it
-//! and points the launcher at the result.
+//! The Download tab: fetches the game file by file from the team's storage,
+//! checks every file against the list on superpeople.dev, and points the
+//! launcher at the result.
 //!
 //! WHAT IT DOWNLOADS
 //! -----------------
-//! One file: `Manifest #2065353802481281242.7z` from the archive.org item
-//! `SPShippingDev` ("SUPER PEOPLE Testing Grounds [S-DEV]"), ~27.7 GB. Size and
-//! MD5 are NOT hardcoded -- they are read from archive.org's metadata API at the
-//! start of every run, so a re-upload of the item cannot leave the launcher
-//! checking against a stale hash.
+//! The game as its own files (BravoHotelClient.exe, BravoHotelGame\, Engine\:
+//! about 455 files, 30.7 GB), from the team's private Storj bucket. Which
+//! files, their sizes and SHA-256 come from the website
+//! (`GET /api/launcher/game`); each file is then downloaded through a
+//! 15-minute link the website hands to the signed-in player
+//! (`POST /api/launcher/game/link`), which also enforces the download limits.
+//! The files are on Storj and the list is on the website: someone who could
+//! change the bucket still could not get a changed file past the check.
 //!
 //! THE PIPELINE
 //! ------------
-//!   checking    metadata + free-space check
-//!   downloading HTTP GET with `Range`, appended to `<dir>\.sp-download\<file>.part`
-//!   verifying   MD5 of the finished file against archive.org's value
-//!   extracting  7-Zip (`7za.exe` embedded at build time, or an installed 7-Zip)
-//!   done        install folder set, archive and temp folder deleted
+//!   checking     the list; what the folder already has (a file of the right
+//!                size is there -- or, for Verify files, of the right SHA-256);
+//!                free space for what is missing
+//!   downloading  twelve files at a time, each an HTTP GET with `Range` into
+//!                `<folder>\.sp-download\<sha256>.part`, hashed as it arrives
+//!                and moved into place once it matches. BravoHotelClient.exe
+//!                goes in last, so a half-downloaded folder never looks like
+//!                an install.
+//!   done         install folder set, temp folder deleted
 //!
 //! PAUSE / RESUME
 //! --------------
-//! Pause stops the task and keeps the `.part` file. Continue sends a `Range`
-//! request from the current length. The same happens after a launcher restart
-//! or a crash: `download.v1.json` in the config dir remembers the target folder,
-//! and the length of the `.part` file IS the progress -- there is no separate
-//! counter that could disagree with the disk. A server that answers a range
-//! request with a full `200` is detected and the file is restarted from zero
-//! rather than corrupted by appending a second copy.
+//! Pause stops the downloads and keeps the `.part` files. Continue asks for the
+//! list again, skips the files already in place, and sends a `Range` request
+//! from each part's current length; the part's bytes are hashed again first,
+//! so the check still covers the whole file. The same happens after a launcher
+//! restart or a crash: `download.v1.json` in the config dir remembers the
+//! folder, and the parts on disk ARE the progress. A server that answers a
+//! range request with a full `200` is detected and that file restarts from
+//! zero rather than being corrupted by a second copy.
 //!
-//! Network errors are retried automatically (backoff 2 s .. 30 s, 25 tries per
-//! run) because archive.org regularly drops connections on multi-GB transfers;
-//! a stalled stream (no byte for 45 s) counts as an error.
+//! Network errors are retried per file (backoff 2 s .. 30 s, 25 tries); a
+//! stalled stream (no byte for 45 s) counts as an error. A file whose checksum
+//! does not match is deleted and fetched again.
 //!
-//! While a download or extraction runs, Windows is asked not to go to sleep
+//! While a download runs, Windows is asked not to go to sleep
 //! (`SetThreadExecutionState`); the display may still turn off.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::error::{LauncherError, Result};
 
 // ----------------------------------------------------------------- source ---
 
-pub const ITEM_ID: &str = "SPShippingDev";
-pub const FILE_NAME: &str = "Manifest #2065353802481281242.7z";
-/// `FILE_NAME` percent-encoded (space and '#').
-const FILE_URL: &str = "https://archive.org/download/SPShippingDev/Manifest%20%232065353802481281242.7z";
-const META_URL: &str = "https://archive.org/metadata/SPShippingDev/files";
-
-/// Before the archive is downloaded its unpacked size is unknown; this is the
-/// estimate used for the first free-space check. The game is mostly .pak
-/// files that are already compressed, so 7z gains little on them -- 1.3x is
-/// deliberately on the safe side. The exact number is read from the archive
-/// itself before extraction and checked again.
-const UNPACKED_ESTIMATE: f64 = 1.3;
-/// Headroom on top of every free-space requirement.
+/// The website's list of the game's files (sp-website app/api/launcher/game).
+const LIST_PATH: &str = "/api/launcher/game";
+/// A download link for one file, for the signed-in player (…/game/link).
+const LINK_PATH: &str = "/api/launcher/game/link";
+/// Files downloaded at the same time. The bucket gives about 9 MB/s per
+/// connection; 8 filled a 50 MB/s line in a test, 12 leaves room for faster ones.
+const PARALLEL: usize = 12;
+/// Headroom on top of the free-space requirement.
 const SPACE_MARGIN: u64 = 2 * 1024 * 1024 * 1024;
 
 const STATE_FILE: &str = "download.v1.json";
 const TEMP_DIR: &str = ".sp-download";
+/// The archive earlier launchers downloaded from archive.org, possibly left
+/// half-downloaded in the temp folder: up to 28 GB nothing uses any more.
+const OLD_ARCHIVE_PART: &str = "Manifest #2065353802481281242.7z.part";
 const MAX_RETRIES: u32 = 25;
 const STALL_TIMEOUT: Duration = Duration::from_secs(45);
 const EMIT_EVERY: Duration = Duration::from_millis(250);
@@ -77,10 +85,8 @@ pub enum Phase {
     Idle,
     Checking,
     Downloading,
-    /// Stopped by the user (or by a launcher restart); the `.part` file stays.
+    /// Stopped by the user (or by a launcher restart); the `.part` files stay.
     Paused,
-    Verifying,
-    Extracting,
     Done,
     Failed,
 }
@@ -92,17 +98,17 @@ pub struct Status {
     pub phase: Phase,
     /// Target folder the player chose. Empty until one is picked.
     pub dir: String,
-    /// Bytes done in the CURRENT step (downloaded / hashed / unpacked).
+    /// Bytes of the missing files downloaded so far.
     pub done: u64,
-    /// Size of the current step. 0 while unknown.
+    /// Size of the missing files. 0 while unknown.
     pub total: u64,
     /// Bytes per second, smoothed. 0 when not transferring.
     pub speed: f64,
-    /// Seconds left in the current step, if it can be estimated.
+    /// Seconds left, if it can be estimated.
     pub eta_secs: Option<u64>,
-    /// Human-readable line under the bar (errors, "Retrying in 8 s", ...).
+    /// Human-readable line under the bar ("120 of 455 files", errors, ...).
     pub message: String,
-    /// Free space on the target drive, and what the whole install needs.
+    /// Free space on the target drive, and what the missing files need.
     pub free_bytes: Option<u64>,
     pub needed_bytes: Option<u64>,
     pub retries: u32,
@@ -128,17 +134,30 @@ impl Status {
     }
 }
 
-/// Survives restarts. The `.part` file length is the progress; this only
-/// remembers WHERE, and what the file is supposed to be.
+/// Survives restarts. The `.part` files are the progress; this only remembers
+/// WHERE, and how much the run had to fetch (for the bar after a restart).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Saved {
     dir: String,
     total: u64,
-    md5: String,
-    /// Set once the MD5 matched, so a pause during extraction does not hash
-    /// 28 GB again.
-    verified: bool,
+    /// A Verify files run: Continue carries on checking hashes.
+    verify: bool,
+}
+
+/// The website's list of the game's files.
+#[derive(Debug, Clone, Deserialize)]
+struct GameList {
+    files: Vec<GameFile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GameFile {
+    /// Relative, with `/`: `BravoHotelGame/Content/Paks/pakchunk0-WindowsClient.pak`.
+    path: String,
+    size: u64,
+    /// Lowercase hex.
+    sha256: String,
 }
 
 /// Shared between the commands and the worker task.
@@ -151,16 +170,19 @@ pub struct Downloader {
 
 impl Downloader {
     pub fn new(config_dir: PathBuf) -> Self {
+        // The 7-Zip earlier launchers unpacked the archive with: unused now.
+        let _ = std::fs::remove_file(config_dir.join("tools").join("7za.exe"));
         let saved = load_saved(&config_dir);
         let mut st = Status::idle(saved.dir.clone());
         // Something was in flight when the launcher last closed: show it as
         // paused with its real progress, so the tab offers "Continue".
         if !saved.dir.is_empty() {
-            let part = part_path(Path::new(&saved.dir));
-            if let Ok(meta) = std::fs::metadata(&part) {
+            let temp = Path::new(&saved.dir).join(TEMP_DIR);
+            let _ = std::fs::remove_file(temp.join(OLD_ARCHIVE_PART));
+            if let Some(done) = parts_on_disk(&temp) {
                 st.phase = Phase::Paused;
-                st.done = meta.len();
-                st.total = saved.total;
+                st.done = done;
+                st.total = saved.total.max(done);
                 st.message = "Paused -- press Continue to resume where it stopped.".into();
             }
         }
@@ -187,8 +209,11 @@ impl Downloader {
 
 // --------------------------------------------------------------- commands ---
 
-/// Start, or continue, a download into `dir`.
-pub fn start(app: &AppHandle, dl: &Downloader, dir: String) -> Result<()> {
+/// Start, or continue, a download into `dir`. `verify` (Verify files) checks
+/// the SHA-256 of the files already there instead of only their size, and
+/// downloads the damaged ones again. `session` is the player's Discord
+/// sign-in, which the website wants for each file's link.
+pub fn start(app: &AppHandle, dl: &Downloader, dir: String, verify: bool, session: String) -> Result<()> {
     if dl.running.swap(true, Ordering::SeqCst) {
         return Err("A download is already running.".into());
     }
@@ -202,12 +227,14 @@ pub fn start(app: &AppHandle, dl: &Downloader, dir: String) -> Result<()> {
         return Err(LauncherError::Message(format!("Cannot use that folder: {e}")));
     }
 
-    // Switching folders abandons the old partial file's bookkeeping (the file
-    // itself is left where it is -- the player may still want it).
+    // Switching folders abandons the old partial files' bookkeeping (the files
+    // themselves are left where they are -- the player may still want them).
     let mut saved = load_saved(&dl.config_dir);
     if saved.dir != dir_path.to_string_lossy() {
         saved = Saved { dir: dir_path.to_string_lossy().into_owned(), ..Default::default() };
     }
+    let verify = verify || saved.verify;
+    saved.verify = verify;
     let _ = store_saved(&dl.config_dir, &saved);
 
     dl.stop.store(false, Ordering::SeqCst);
@@ -215,11 +242,28 @@ pub fn start(app: &AppHandle, dl: &Downloader, dir: String) -> Result<()> {
         let mut st = dl.status.lock().expect("download status");
         *st = Status::idle(saved.dir.clone());
         st.phase = Phase::Checking;
-        st.message = "Asking archive.org for the file...".into();
+        st.message = "Getting the list of the game's files...".into();
     }
+    let source = Source::Website { session };
 
+    // The worker reports through this; the Tauri calls stay here, out of the
+    // worker's code (a test binary cannot load the webview they bring in).
+    let events = app.clone();
+    let tell: Tell = Arc::new(move |event| match event {
+        Event::Status(st) => {
+            let _ = events.emit("download:status", st);
+        }
+        Event::Installed(root) => {
+            if let Some(state) = events.try_state::<crate::AppState>() {
+                let mut cfg = state.config.lock().expect("config mutex");
+                cfg.install_dir = root.clone();
+                let _ = crate::config::save(&state.config_dir, &cfg);
+            }
+            let _ = events.emit("download:installed", root);
+        }
+    });
     let ctx = Ctx {
-        app: app.clone(),
+        tell,
         status: dl.status.clone(),
         stop: dl.stop.clone(),
         config_dir: dl.config_dir.clone(),
@@ -228,7 +272,7 @@ pub fn start(app: &AppHandle, dl: &Downloader, dir: String) -> Result<()> {
     let running = dl.running.clone();
     tauri::async_runtime::spawn(async move {
         let _awake = KeepAwake::new();
-        let outcome = run(&ctx, saved).await;
+        let outcome = run(&ctx, &source, saved, verify).await;
         match outcome {
             Ok(()) => {}
             Err(Stop::Paused) => ctx.set(|s| {
@@ -250,19 +294,20 @@ pub fn start(app: &AppHandle, dl: &Downloader, dir: String) -> Result<()> {
     Ok(())
 }
 
-/// Pause: the worker notices within one chunk and ends as `Paused`.
+/// Pause: the downloads notice within one chunk and the run ends as `Paused`.
 pub fn pause(dl: &Downloader) {
     if dl.is_running() {
         dl.stop.store(true, Ordering::SeqCst);
     }
 }
 
-/// Stop and delete everything this download wrote (the partial archive and
-/// the temp folder). An already extracted game is not touched.
+/// Stop and delete what this download has not finished (the temp folder).
+/// Files already checked and moved into place stay: the next download skips
+/// them.
 pub fn cancel(app: &AppHandle, dl: &Downloader) -> Result<()> {
     dl.stop.store(true, Ordering::SeqCst);
-    // Give the worker a moment to close the file before deleting it; Windows
-    // refuses to delete a file that is still open.
+    // Give the downloads a moment to close their files before deleting them;
+    // Windows refuses to delete a file that is still open.
     for _ in 0..40 {
         if !dl.is_running() {
             break;
@@ -286,10 +331,10 @@ pub fn cancel(app: &AppHandle, dl: &Downloader) -> Result<()> {
     Ok(())
 }
 
-/// Uninstall: delete the game from `dir`, the Game folder. Only what the
-/// archive puts there goes (see `remove_game`), so a Game folder that also
-/// holds other files -- or is a whole drive -- keeps them. The folder setting
-/// stays: Download puts the game back in the same place.
+/// Uninstall: delete the game from `dir`, the Game folder. Only the game's own
+/// folders and exe go (see `remove_game`), so a Game folder that also holds
+/// other files -- or is a whole drive -- keeps them. The folder setting stays:
+/// Download puts the game back in the same place.
 pub fn uninstall(app: &AppHandle, dl: &Downloader, dir: &str) -> Result<()> {
     if dl.is_running() {
         return Err("A download is running. Cancel it before uninstalling.".into());
@@ -298,7 +343,15 @@ pub fn uninstall(app: &AppHandle, dl: &Downloader, dir: &str) -> Result<()> {
     if dir.is_empty() || !crate::game::detect(dir).installed {
         return Err(LauncherError::Message(format!("There is no game to uninstall in {dir}.")));
     }
-    remove_game(Path::new(dir)).map_err(|e| {
+    // The uninstall window's bar: files deleted so far, of how many.
+    let mut last = Instant::now();
+    remove_game(Path::new(dir), &mut |done, total| {
+        if done == total || last.elapsed() >= EMIT_EVERY {
+            last = Instant::now();
+            let _ = app.emit("uninstall:progress", serde_json::json!({ "done": done, "total": total }));
+        }
+    })
+    .map_err(|e| {
         LauncherError::Message(format!("Could not delete every game file ({e}). Close anything using them and press Uninstall again."))
     })?;
     {
@@ -310,21 +363,76 @@ pub fn uninstall(app: &AppHandle, dl: &Downloader, dir: &str) -> Result<()> {
     Ok(())
 }
 
-/// Deletes the game's own entries from `root`: the two game folders, the
-/// DepotDownloader leftovers, then the exe -- last, so a failure halfway (a
-/// locked file) still shows the game as installed and Uninstall can be pressed
-/// again. The folder itself goes only if that leaves it empty. `remove_dir_all`
-/// deletes a link, never what it points to.
-fn remove_game(root: &Path) -> std::io::Result<()> {
-    for name in ["BravoHotelGame", "Engine", ".DepotDownloader"] {
+/// The game's own entries in its folder; the exe goes last.
+const GAME_DIRS: [&str; 3] = ["BravoHotelGame", "Engine", ".DepotDownloader"];
+
+/// What the uninstall window says will go: the game's files and their size.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct Footprint {
+    pub files: u64,
+    pub bytes: u64,
+}
+
+pub fn footprint(dir: &str) -> Footprint {
+    let root = Path::new(dir.trim());
+    let mut found = Footprint::default();
+    for path in game_files(root) {
+        found.files += 1;
+        found.bytes += std::fs::symlink_metadata(&path).map(|m| m.len()).unwrap_or(0);
+    }
+    found
+}
+
+/// Every file of the game in `root`, the exe last. Links are not followed:
+/// what one points to is not the game's.
+fn game_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut dirs: Vec<PathBuf> = GAME_DIRS.iter().map(|name| root.join(name)).collect();
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => dirs.push(entry.path()),
+                Ok(t) if t.is_file() => files.push(entry.path()),
+                _ => {}
+            }
+        }
+    }
+    let exe = root.join(crate::game::GAME_EXE);
+    if exe.is_file() {
+        files.push(exe);
+    }
+    files
+}
+
+/// Deletes the game's own entries from `root`: the files of the two game
+/// folders and the DepotDownloader leftovers of the old archive one by one
+/// (`progress` hears how many of how many), what is left of those folders,
+/// then the exe -- last, so a failure halfway (a locked file) still shows the
+/// game as installed and Uninstall can be pressed again. The folder itself
+/// goes only if that leaves it empty. `remove_dir_all` deletes a link, never
+/// what it points to.
+fn remove_game(root: &Path, progress: &mut dyn FnMut(u64, u64)) -> std::io::Result<()> {
+    let exe = root.join(crate::game::GAME_EXE);
+    let files: Vec<PathBuf> = game_files(root).into_iter().filter(|f| *f != exe).collect();
+    let total = files.len() as u64 + u64::from(exe.exists());
+    for (i, file) in files.iter().enumerate() {
+        match std::fs::remove_file(file) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        progress(i as u64 + 1, total);
+    }
+    for name in GAME_DIRS {
         let path = root.join(name);
         if path.is_dir() {
             std::fs::remove_dir_all(&path)?;
         }
     }
-    let exe = root.join(crate::game::GAME_EXE);
     if exe.exists() {
         std::fs::remove_file(&exe)?;
+        progress(total, total);
     }
     let _ = std::fs::remove_dir(root);
     Ok(())
@@ -343,8 +451,17 @@ impl<E: std::fmt::Display> From<E> for Stop {
     }
 }
 
+/// What the worker tells the launcher.
+enum Event {
+    Status(Status),
+    /// The game is in this folder now: it becomes the Game folder.
+    Installed(String),
+}
+
+type Tell = Arc<dyn Fn(Event) + Send + Sync>;
+
 struct Ctx {
-    app: AppHandle,
+    tell: Tell,
     status: Arc<Mutex<Status>>,
     stop: Arc<AtomicBool>,
     config_dir: PathBuf,
@@ -359,67 +476,59 @@ impl Ctx {
     fn emit(&self) {
         let mut st = self.status.lock().expect("download status").clone();
         st.free_bytes = free_space(&self.dir);
-        let _ = self.app.emit("download:status", st);
+        (self.tell)(Event::Status(st));
     }
     fn stopped(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
     }
 }
 
-async fn run(ctx: &Ctx, mut saved: Saved) -> std::result::Result<(), Stop> {
-    // ---- already there -------------------------------------------------
-    // The game is already in this folder (a copy the player had, or an
-    // earlier install): nothing to fetch. Not while a download of its own is
-    // waiting here to be finished -- a half-unpacked archive can look like an
-    // install.
-    if !saved.verified && !part_path(&ctx.dir).exists() {
-        if let Some(root) = find_install_root(&ctx.dir) {
-            finish(ctx, &root, "The game is already in this folder: nothing to download.");
-            return Ok(());
-        }
-    }
-
+async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std::result::Result<(), Stop> {
     // ---- checking ------------------------------------------------------
     ctx.emit();
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("SP-Launcher/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(20))
-        .build()?;
+    let client = http_client()?;
+    let list = fetch_list(&client)
+        .await
+        .map_err(|e| Stop::Failed(format!("Could not get the list of the game's files from superpeople.dev: {e}")))?;
 
-    match fetch_meta(&client).await {
-        Ok((size, md5)) => {
-            // A different size/hash than last time means the item changed:
-            // the old partial file belongs to a different archive.
-            if saved.total != 0 && (saved.total != size || (!saved.md5.is_empty() && saved.md5 != md5)) {
-                let _ = std::fs::remove_file(part_path(&ctx.dir));
-                saved.verified = false;
-            }
-            saved.total = size;
-            saved.md5 = md5;
-            let _ = store_saved(&ctx.config_dir, &saved);
-        }
-        // Offline check, but a size remembered from last time: carry on and
-        // let the download itself fail if the network is really gone.
-        Err(e) if saved.total > 0 => {
-            ctx.set(|s| s.message = format!("Could not refresh file info ({e}); continuing."));
-        }
-        Err(e) => return Err(Stop::Failed(format!("Could not reach archive.org: {e}"))),
+    let temp = ctx.dir.join(TEMP_DIR);
+    let _ = std::fs::remove_file(temp.join(OLD_ARCHIVE_PART));
+    // The game already in this folder (or a folder or two below it) is
+    // completed where it is; otherwise it goes straight into the folder.
+    let root = find_install_root(&ctx.dir).unwrap_or_else(|| ctx.dir.clone());
+    let mut jobs = missing(&root, &list.files);
+    if verify {
+        let damaged = damaged(ctx, &root, &list.files, &jobs).await?;
+        jobs.extend(damaged);
+        jobs.sort_by_key(|f| (is_exe(f), std::cmp::Reverse(f.size)));
+    }
+    if jobs.is_empty() {
+        let message = if verify {
+            format!("All {} files are fine: nothing to download.", list.files.len())
+        } else {
+            "The game is already in this folder: nothing to download.".to_string()
+        };
+        finish(ctx, &root, &message);
+        return Ok(());
     }
 
-    let part = part_path(&ctx.dir);
-    let have = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
-    let unpacked_guess = (saved.total as f64 * UNPACKED_ESTIMATE) as u64;
-    let needed = saved.total.saturating_sub(have) + unpacked_guess + SPACE_MARGIN;
+    let total: u64 = jobs.iter().map(|j| j.size).sum();
+    let have: u64 = jobs.iter().map(|j| file_len(&part_path(&temp, j)).min(j.size)).sum();
+    saved.total = total;
+    let _ = store_saved(&ctx.config_dir, &saved);
+
+    let needed = total - have + SPACE_MARGIN;
     let free = free_space(&ctx.dir);
     ctx.set(|s| {
-        s.needed_bytes = Some(saved.total + unpacked_guess);
+        s.needed_bytes = Some(total);
         s.free_bytes = free;
+        s.done = have;
+        s.total = total;
     });
     if let Some(free) = free {
         if free < needed {
             return Err(Stop::Failed(format!(
-                "Not enough space on that drive: {} free, about {} needed (download + unpacked game). \
-                 Free some space or choose another drive.",
+                "Not enough space on that drive: {} free, about {} needed. Free some space or choose another drive.",
                 gb(free),
                 gb(needed)
             )));
@@ -427,35 +536,96 @@ async fn run(ctx: &Ctx, mut saved: Saved) -> std::result::Result<(), Stop> {
     }
 
     // ---- downloading ---------------------------------------------------
-    if !saved.verified {
-        download(ctx, &client, &part, saved.total).await?;
-
-        // ---- verifying -------------------------------------------------
-        if !saved.md5.is_empty() {
-            verify(ctx, &part, saved.total, &saved.md5).await?;
-        }
-        saved.verified = true;
-        let _ = store_saved(&ctx.config_dir, &saved);
-    }
-
-    // ---- extracting ----------------------------------------------------
-    let root = extract(ctx, &part, saved.total).await?;
+    fetch_all(ctx, &client, source, &root, &temp, &jobs, have).await?;
 
     // ---- done ----------------------------------------------------------
-    finish(ctx, &root, "Installed. The archive was deleted to free the space again.");
+    let message = if verify {
+        format!("Repaired: {} missing or damaged files were downloaded again.", jobs.len())
+    } else {
+        format!("Installed. All {} files were checked.", list.files.len())
+    };
+    finish(ctx, &root, &message);
     Ok(())
 }
 
-/// Point the launcher at a finished install and report it done. The frontend
-/// re-reads the config on `download:installed`, so its debounced writer cannot
-/// put the old folder back.
+/// Verify files: the files of the right size whose SHA-256 is wrong anyway.
+/// Reads the whole game, so it reports progress like a download and stops
+/// for Pause.
+async fn damaged(ctx: &Ctx, root: &Path, files: &[GameFile], missing: &[GameFile]) -> std::result::Result<Vec<GameFile>, Stop> {
+    let skip: std::collections::HashSet<&str> = missing.iter().map(|f| f.path.as_str()).collect();
+    let check: Vec<(PathBuf, GameFile)> =
+        files.iter().filter(|f| !skip.contains(f.path.as_str())).map(|f| (target_path(root, f), f.clone())).collect();
+    let total: u64 = check.iter().map(|(_, f)| f.size).sum();
+    ctx.set(|s| {
+        s.phase = Phase::Checking;
+        s.done = 0;
+        s.total = total;
+        s.message = format!("Checking files: 0 of {}", check.len());
+    });
+    ctx.emit();
+
+    let status = ctx.status.clone();
+    let stop = ctx.stop.clone();
+    let tell = ctx.tell.clone();
+    let dir = ctx.dir.clone();
+    let found = tokio::task::spawn_blocking(move || -> Option<Vec<GameFile>> {
+        let mut bad = Vec::new();
+        let mut buf = vec![0u8; 4 * 1024 * 1024];
+        let mut done = 0u64;
+        let mut meter = Meter::new();
+        let mut last = Instant::now();
+        for (i, (path, file)) in check.iter().enumerate() {
+            let mut hasher = Sha256::new();
+            let Ok(mut reader) = std::fs::File::open(path) else {
+                bad.push(file.clone());
+                continue;
+            };
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    return None;
+                }
+                let n = match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => {
+                        // Unreadable counts as damaged: it is downloaded again.
+                        hasher = Sha256::new();
+                        break;
+                    }
+                };
+                hasher.update(&buf[..n]);
+                done += n as u64;
+                meter.add(n as u64);
+                if last.elapsed() >= EMIT_EVERY {
+                    last = Instant::now();
+                    let speed = meter.rate();
+                    let snapshot = {
+                        let mut st = status.lock().expect("download status");
+                        st.done = done;
+                        st.speed = speed;
+                        st.eta_secs = eta(total.saturating_sub(done), speed);
+                        st.message = format!("Checking files: {} of {}", i + 1, check.len());
+                        st.clone()
+                    };
+                    tell(Event::Status(Status { free_bytes: free_space(&dir), ..snapshot }));
+                }
+            }
+            if hex(&hasher.finalize()) != file.sha256 {
+                bad.push(file.clone());
+            }
+        }
+        Some(bad)
+    })
+    .await
+    .map_err(|e| Stop::Failed(e.to_string()))?;
+    found.ok_or(Stop::Paused)
+}
+
+/// Report a finished install: the launcher makes it the Game folder (`start`'s
+/// `tell`). The frontend re-reads the config on `download:installed`, so its
+/// debounced writer cannot put the old folder back.
 fn finish(ctx: &Ctx, root: &Path, message: &str) {
     let root_str = root.to_string_lossy().into_owned();
-    if let Some(state) = ctx.app.try_state::<crate::AppState>() {
-        let mut cfg = state.config.lock().expect("config mutex");
-        cfg.install_dir = root_str.clone();
-        let _ = crate::config::save(&state.config_dir, &cfg);
-    }
     let _ = std::fs::remove_dir_all(ctx.dir.join(TEMP_DIR));
     let _ = std::fs::remove_file(ctx.config_dir.join(STATE_FILE));
     ctx.set(|s| {
@@ -466,473 +636,505 @@ fn finish(ctx: &Ctx, root: &Path, message: &str) {
         s.install_dir = root_str.clone();
         s.message = message.into();
     });
-    let _ = ctx.app.emit("download:installed", root_str);
+    (ctx.tell)(Event::Installed(root_str));
 }
 
-#[derive(Deserialize)]
-struct MetaFiles {
-    result: Vec<MetaFile>,
-}
-#[derive(Deserialize)]
-struct MetaFile {
-    name: String,
-    #[serde(default)]
-    size: Option<String>,
-    #[serde(default)]
-    md5: Option<String>,
+fn http_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .user_agent(concat!("SP-Launcher/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(20))
+        .build()?)
 }
 
-/// (size, md5) of `FILE_NAME` from archive.org's metadata API.
-async fn fetch_meta(client: &reqwest::Client) -> Result<(u64, String)> {
-    let resp = client.get(META_URL).timeout(Duration::from_secs(30)).send().await?.error_for_status()?;
-    let files: MetaFiles = resp.json().await?;
-    let f = files
-        .result
-        .into_iter()
-        .find(|f| f.name == FILE_NAME)
-        .ok_or_else(|| LauncherError::Message(format!("{FILE_NAME} is no longer listed in the archive.org item {ITEM_ID}.")))?;
-    let size = f
-        .size
-        .and_then(|s| s.parse::<u64>().ok())
-        .ok_or_else(|| LauncherError::Message("archive.org did not report the file size.".into()))?;
-    Ok((size, f.md5.unwrap_or_default().to_ascii_lowercase()))
+async fn fetch_list(client: &reqwest::Client) -> Result<GameList> {
+    let url = format!("{}{LIST_PATH}", crate::auth::site_url());
+    let list: GameList = client.get(url).timeout(Duration::from_secs(30)).send().await?.error_for_status()?.json().await?;
+    check_list(&list).map_err(|why| LauncherError::Message(format!("the list is not valid ({why})")))?;
+    Ok(list)
 }
 
-async fn download(ctx: &Ctx, client: &reqwest::Client, part: &Path, total: u64) -> std::result::Result<(), Stop> {
+/// The list decides where files are written and what is downloaded, so it is
+/// checked before anything is: paths that stay inside the game folder, real
+/// checksums, each file once.
+fn check_list(list: &GameList) -> std::result::Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for f in &list.files {
+        if !safe_path(&f.path) {
+            return Err(format!("bad path {:?}", f.path));
+        }
+        if f.sha256.len() != 64 || !f.sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+            return Err(format!("bad checksum for {}", f.path));
+        }
+        // Windows paths ignore case: two entries must not land on one file.
+        if !seen.insert(f.path.to_ascii_lowercase()) {
+            return Err(format!("{} is listed twice", f.path));
+        }
+    }
+    if !list.files.iter().any(|f| f.path == crate::game::GAME_EXE) {
+        return Err(format!("{} is not in it", crate::game::GAME_EXE));
+    }
+    Ok(())
+}
+
+/// A relative path with `/` whose every part is a plain name: nothing that
+/// could leave the game folder (`..`, a drive, a leading `/`) or that Windows
+/// would read differently (`\`, a trailing dot or space).
+fn safe_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && path.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && !part.ends_with('.')
+                && !part.ends_with(' ')
+                && !part.chars().any(|c| c.is_control() || matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        })
+}
+
+/// The files of the list the folder does not have: missing, or of another
+/// size. Biggest first, the exe last.
+fn missing(root: &Path, files: &[GameFile]) -> Vec<GameFile> {
+    let mut jobs: Vec<GameFile> = files
+        .iter()
+        .filter(|f| std::fs::metadata(target_path(root, f)).map(|m| m.len() != f.size).unwrap_or(true))
+        .cloned()
+        .collect();
+    jobs.sort_by_key(|f| (is_exe(f), std::cmp::Reverse(f.size)));
+    jobs
+}
+
+fn is_exe(f: &GameFile) -> bool {
+    f.path == crate::game::GAME_EXE
+}
+
+fn target_path(root: &Path, f: &GameFile) -> PathBuf {
+    f.path.split('/').fold(root.to_path_buf(), |p, part| p.join(part))
+}
+
+fn part_path(temp: &Path, f: &GameFile) -> PathBuf {
+    temp.join(format!("{}.part", f.sha256))
+}
+
+/// Where a file's download link comes from.
+enum Source {
+    /// The website: a 15-minute link per file for the signed-in player, within
+    /// the download limits (sp-website app/api/launcher/game/link).
+    Website { session: String },
+    /// `base` plus the file's path (the tests' local server).
+    #[cfg(test)]
+    Base(String),
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct LinkAnswer {
+    url: Option<String>,
+    error: Option<String>,
+    /// Unix milliseconds: when a download limit ends.
+    until: Option<u64>,
+}
+
+/// A link to download `job` from, asked for again at each try: a link only
+/// works for 15 minutes, and the website hands out the same one meanwhile.
+async fn link(client: &reqwest::Client, source: &Source, job: &GameFile) -> std::result::Result<String, Miss> {
+    let session = match source {
+        #[cfg(test)]
+        Source::Base(base) => return Ok(file_url(base, &job.path)),
+        Source::Website { session } => session,
+    };
+    let resp = client
+        .post(format!("{}{LINK_PATH}", crate::auth::site_url()))
+        .bearer_auth(session)
+        .json(&serde_json::json!({ "path": job.path }))
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| Miss::Retry(format!("superpeople.dev could not be reached ({e})")))?;
+    let status = resp.status();
+    let answer: LinkAnswer = resp.json().await.unwrap_or_default();
+    match status.as_u16() {
+        200 => answer
+            .url
+            .filter(|url| url.starts_with("https://"))
+            .ok_or_else(|| Miss::Retry("superpeople.dev sent no link".into())),
+        401 => Err(Miss::Fatal(
+            "Your Discord sign-in has expired. Sign in again, then press Continue -- your progress is kept.".into(),
+        )),
+        403 if answer.error.as_deref() == Some("banned") => Err(Miss::Fatal(
+            "This account is banned from SUPER PEOPLE, so it cannot download the game. If you think this is a mistake, contact us on Discord."
+                .into(),
+        )),
+        429 => Err(Miss::Fatal(limit_reached(answer.until))),
+        404 => Err(Miss::Fatal(format!("{} is no longer in the game's file list. Press Continue to get the new list.", job.path))),
+        503 if answer.error.as_deref() == Some("setup") => {
+            Err(Miss::Fatal("Game downloads are not open yet. Try again later -- your progress is kept.".into()))
+        }
+        _ => Err(Miss::Retry(format!("superpeople.dev answered {status}"))),
+    }
+}
+
+/// The download limit's message: until when, from the website's answer.
+fn limit_reached(until_ms: Option<u64>) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let hours = until_ms.map(|until| until.saturating_sub(now).div_ceil(3_600_000)).unwrap_or(24).max(1);
+    let wait = if hours == 1 { "about an hour".to_string() } else { format!("about {hours} hours") };
+    format!(
+        "Downloads are paused for {wait}: this account or internet connection downloaded more than twice the game \
+         in the last hour. Your progress is kept. If this is a mistake, ask the team on Discord."
+    )
+}
+
+/// `base` plus the path, every part percent-encoded.
+#[cfg(test)]
+fn file_url(base: &str, path: &str) -> String {
+    let mut url = base.to_string();
+    for (i, part) in path.split('/').enumerate() {
+        if i > 0 {
+            url.push('/');
+        }
+        for b in part.bytes() {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+                url.push(b as char);
+            } else {
+                url.push_str(&format!("%{b:02X}"));
+            }
+        }
+    }
+    url
+}
+
+/// The download's progress, shared by the files downloading at once.
+struct Progress {
+    done: AtomicU64,
+    total: u64,
+    files_done: AtomicUsize,
+    files: usize,
+    meter: Mutex<Meter>,
+    last_emit: Mutex<Instant>,
+}
+
+impl Progress {
+    /// A file's bytes on disk are now `now` (it was `counted`).
+    fn count(&self, counted: &mut u64, now: u64) {
+        if now >= *counted {
+            let more = now - *counted;
+            self.done.fetch_add(more, Ordering::SeqCst);
+            self.meter.lock().expect("meter").add(more);
+        } else {
+            self.done.fetch_sub(*counted - now, Ordering::SeqCst);
+        }
+        *counted = now;
+    }
+
+    fn tick(&self, ctx: &Ctx) {
+        {
+            let mut last = self.last_emit.lock().expect("last emit");
+            if last.elapsed() < EMIT_EVERY {
+                return;
+            }
+            *last = Instant::now();
+        }
+        let done = self.done.load(Ordering::SeqCst);
+        let speed = self.meter.lock().expect("meter").rate();
+        ctx.set(|s| {
+            s.done = done;
+            s.speed = speed;
+            s.eta_secs = eta(self.total.saturating_sub(done), speed);
+        });
+        ctx.emit();
+    }
+
+    fn file_finished(&self, ctx: &Ctx) {
+        let n = self.files_done.fetch_add(1, Ordering::SeqCst) + 1;
+        ctx.set(|s| s.message = format!("{n} of {} files", self.files));
+    }
+}
+
+async fn fetch_all(
+    ctx: &Ctx,
+    client: &reqwest::Client,
+    source: &Source,
+    root: &Path,
+    temp: &Path,
+    jobs: &[GameFile],
+    have: u64,
+) -> std::result::Result<(), Stop> {
     use futures_util::StreamExt;
-    use tokio::io::AsyncWriteExt;
 
+    std::fs::create_dir_all(temp)?;
+    let total: u64 = jobs.iter().map(|j| j.size).sum();
+    let progress = Progress {
+        done: AtomicU64::new(have),
+        total,
+        files_done: AtomicUsize::new(0),
+        files: jobs.len(),
+        meter: Mutex::new(Meter::new()),
+        last_emit: Mutex::new(Instant::now()),
+    };
+    ctx.set(|s| {
+        s.phase = Phase::Downloading;
+        s.done = have;
+        s.total = total;
+        s.message = if have > 0 { "Resuming...".into() } else { format!("0 of {} files", jobs.len()) };
+    });
+    ctx.emit();
+
+    // Collected first: a lazy `map` closure here would not be Send.
+    let tries: Vec<_> = jobs.iter().map(|job| fetch_one(ctx, client, source, temp, job, &progress)).collect();
+    let mut results = futures_util::stream::iter(tries).buffer_unordered(PARALLEL);
+    let mut paused = false;
+    while let Some(result) = results.next().await {
+        match result {
+            Ok(()) => {}
+            Err(Stop::Paused) => paused = true,
+            // Dropping the others stops them; their parts are kept.
+            Err(failed) => return Err(failed),
+        }
+    }
+    drop(results);
+    if paused || ctx.stopped() {
+        return Err(Stop::Paused);
+    }
+
+    // Everything checked: the files go into place, the exe last.
+    ctx.set(|s| {
+        s.done = progress.done.load(Ordering::SeqCst);
+        s.speed = 0.0;
+        s.eta_secs = None;
+        s.message = format!("Putting the {} files in place...", jobs.len());
+    });
+    ctx.emit();
+    for job in jobs {
+        let part = part_path(temp, job);
+        let target = target_path(root, job);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&part, &target).map_err(|e| {
+            Stop::Failed(format!("Could not put {} in place ({e}). Close the game and press Continue.", job.path))
+        })?;
+    }
+    Ok(())
+}
+
+/// Why a try failed: worth another try, or not (the file is not there at all,
+/// the download limit, an expired sign-in).
+enum Miss {
+    Retry(String),
+    Fatal(String),
+}
+
+/// One file into its `.part`, checked against its SHA-256. Moving it into
+/// place is `fetch_all`'s, once every file is here.
+async fn fetch_one(
+    ctx: &Ctx,
+    client: &reqwest::Client,
+    source: &Source,
+    temp: &Path,
+    job: &GameFile,
+    progress: &Progress,
+) -> std::result::Result<(), Stop> {
+    let part = part_path(temp, job);
+    let name = job.path.rsplit('/').next().unwrap_or(&job.path).to_string();
+    // What the start-up total already counts for this file.
+    let mut counted = file_len(&part).min(job.size);
+    // The hash of the part's bytes, kept between tries so a retry does not
+    // read them again.
+    let mut hashed: Option<(u64, Sha256)> = None;
     let mut retries = 0u32;
-    let mut meter = Meter::new();
     loop {
         if ctx.stopped() {
             return Err(Stop::Paused);
         }
-        let mut have = tokio::fs::metadata(part).await.map(|m| m.len()).unwrap_or(0);
-        if have > total {
+        let mut have = file_len(&part);
+        if have > job.size {
             // Longer than the real file: not ours to trust.
-            tokio::fs::remove_file(part).await?;
+            std::fs::remove_file(&part)?;
             have = 0;
         }
-        if have == total {
-            return Ok(());
-        }
-        ctx.set(|s| {
-            s.phase = Phase::Downloading;
-            s.done = have;
-            s.total = total;
-            s.retries = retries;
-            if retries == 0 {
-                s.message = if have > 0 { "Resuming...".into() } else { "Downloading...".into() };
-            }
-        });
-        ctx.emit();
+        progress.count(&mut counted, have);
+        let mut hasher = match hashed.take() {
+            Some((n, h)) if n == have => h,
+            _ => hash_prefix(&part, have).await?,
+        };
 
-        let attempt: std::result::Result<(), String> = async {
-            let resp = client
-                .get(FILE_URL)
-                .header(reqwest::header::RANGE, format!("bytes={have}-"))
-                .send()
-                .await
-                .map_err(|e| e.to_string())?;
-            let status = resp.status();
-            let mut file = if status == reqwest::StatusCode::PARTIAL_CONTENT {
-                tokio::fs::OpenOptions::new().create(true).append(true).open(part).await.map_err(|e| e.to_string())?
-            } else if status.is_success() {
-                // The server ignored the range: start over instead of
-                // appending a second copy of the beginning.
-                have = 0;
-                tokio::fs::File::create(part).await.map_err(|e| e.to_string())?
-            } else if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
-                return Ok(()); // nothing left to send; the length check above decides
-            } else {
-                return Err(format!("archive.org answered {status}"));
+        if have < job.size {
+            let outcome = match link(client, source, job).await {
+                Ok(url) => stream_into(ctx, client, &url, &name, &part, job.size, &mut have, &mut hasher, progress, &mut counted).await,
+                Err(miss) => Err(miss),
             };
-            let mut stream = resp.bytes_stream();
-            let mut last_emit = Instant::now();
-            let mut last_flush = Instant::now();
-            loop {
-                if ctx.stopped() {
-                    file.flush().await.map_err(|e| e.to_string())?;
-                    return Ok(());
+            match outcome {
+                Ok(()) if have == job.size => {}
+                Ok(()) if ctx.stopped() => return Err(Stop::Paused),
+                Ok(()) => {
+                    hashed = Some((have, hasher));
+                    if !backoff(ctx, &mut retries, format!("{name}: the connection closed early")).await {
+                        return Err(Stop::Failed(retry_exhausted()));
+                    }
+                    continue;
                 }
-                let next = tokio::time::timeout(STALL_TIMEOUT, stream.next())
-                    .await
-                    .map_err(|_| "the connection stalled".to_string())?;
-                let Some(chunk) = next else { break };
-                let chunk = chunk.map_err(|e| e.to_string())?;
-                file.write_all(&chunk).await.map_err(|e| format!("writing to disk failed: {e}"))?;
-                have += chunk.len() as u64;
-                meter.add(chunk.len() as u64);
-                if last_flush.elapsed() > Duration::from_secs(5) {
-                    // So a crash loses seconds, not minutes, of progress.
-                    file.flush().await.map_err(|e| e.to_string())?;
-                    last_flush = Instant::now();
-                }
-                if last_emit.elapsed() >= EMIT_EVERY {
-                    last_emit = Instant::now();
-                    let speed = meter.rate();
-                    ctx.set(|s| {
-                        s.done = have;
-                        s.speed = speed;
-                        s.eta_secs = eta(total.saturating_sub(have), speed);
-                        s.message.clear();
-                    });
-                    ctx.emit();
+                Err(Miss::Fatal(why)) => return Err(Stop::Failed(why)),
+                Err(Miss::Retry(why)) => {
+                    if ctx.stopped() {
+                        return Err(Stop::Paused);
+                    }
+                    hashed = Some((have, hasher));
+                    if !backoff(ctx, &mut retries, format!("{name}: {why}")).await {
+                        return Err(Stop::Failed(retry_exhausted()));
+                    }
+                    continue;
                 }
             }
-            file.flush().await.map_err(|e| e.to_string())?;
-            Ok(())
         }
-        .await;
 
-        match attempt {
-            Ok(()) if ctx.stopped() => return Err(Stop::Paused),
-            Ok(()) => {
-                let now = tokio::fs::metadata(part).await.map(|m| m.len()).unwrap_or(0);
-                if now == total {
-                    return Ok(());
-                }
-                // Stream ended early without an error: retry like any failure.
-                if !backoff(ctx, &mut retries, "the connection closed early".into()).await {
-                    return Err(Stop::Failed(retry_exhausted()));
-                }
+        // The whole file is here: check it.
+        if hex(&hasher.finalize()) != job.sha256 {
+            std::fs::remove_file(&part)?;
+            progress.count(&mut counted, 0);
+            if !backoff(ctx, &mut retries, format!("{name} arrived damaged")).await {
+                return Err(Stop::Failed(format!(
+                    "{} kept arriving damaged. Press Continue to try again later.",
+                    job.path
+                )));
             }
-            Err(e) => {
-                if !backoff(ctx, &mut retries, e).await {
-                    return Err(Stop::Failed(retry_exhausted()));
-                }
-            }
+            continue;
         }
-        meter = Meter::new();
+        progress.file_finished(ctx);
+        progress.tick(ctx);
+        return Ok(());
     }
+}
+
+/// One request for the rest of the file, appended to the part and hashed as
+/// it arrives. `have` and `hasher` stay right whatever happens, so the next
+/// try carries on from them.
+#[allow(clippy::too_many_arguments)]
+async fn stream_into(
+    ctx: &Ctx,
+    client: &reqwest::Client,
+    url: &str,
+    name: &str,
+    part: &Path,
+    size: u64,
+    have: &mut u64,
+    hasher: &mut Sha256,
+    progress: &Progress,
+    counted: &mut u64,
+) -> std::result::Result<(), Miss> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let resp = client
+        .get(url)
+        .header(reqwest::header::RANGE, format!("bytes={have}-"))
+        .send()
+        .await
+        .map_err(|e| Miss::Retry(e.to_string()))?;
+    let status = resp.status();
+    let mut file = if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(part)
+            .await
+            .map_err(|e| Miss::Retry(e.to_string()))?
+    } else if status.is_success() {
+        // The server ignored the range: start over instead of appending a
+        // second copy of the beginning.
+        *have = 0;
+        *hasher = Sha256::new();
+        progress.count(counted, 0);
+        tokio::fs::File::create(part).await.map_err(|e| Miss::Retry(e.to_string()))?
+    } else if matches!(status.as_u16(), 404 | 410) {
+        return Err(Miss::Fatal(format!("The download server does not have {name} ({status}). Tell the team on Discord.")));
+    } else {
+        // 403 included: an expired link. The next try asks for a new one.
+        return Err(Miss::Retry(format!("the server answered {status}")));
+    };
+
+    let mut stream = resp.bytes_stream();
+    let mut last_flush = Instant::now();
+    loop {
+        if ctx.stopped() {
+            break;
+        }
+        let next = tokio::time::timeout(STALL_TIMEOUT, stream.next())
+            .await
+            .map_err(|_| Miss::Retry("the connection stalled".into()))?;
+        let Some(chunk) = next else { break };
+        let chunk = chunk.map_err(|e| Miss::Retry(e.to_string()))?;
+        if *have + chunk.len() as u64 > size {
+            return Err(Miss::Retry("the server sent more than the file's size".into()));
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| Miss::Fatal(format!("Writing to disk failed: {e}. Your progress is kept -- press Continue.")))?;
+        hasher.update(&chunk);
+        *have += chunk.len() as u64;
+        progress.count(counted, *have);
+        progress.tick(ctx);
+        if last_flush.elapsed() > Duration::from_secs(5) {
+            // So a crash loses seconds, not minutes, of progress.
+            file.flush().await.map_err(|e| Miss::Retry(e.to_string()))?;
+            last_flush = Instant::now();
+        }
+    }
+    file.flush().await.map_err(|e| Miss::Retry(e.to_string()))?;
+    Ok(())
+}
+
+/// The SHA-256 state after the first `len` bytes of a part (a resumed file is
+/// checked whole). Off the async threads: a part can be most of a gigabyte.
+async fn hash_prefix(part: &Path, len: u64) -> std::result::Result<Sha256, Stop> {
+    if len == 0 {
+        return Ok(Sha256::new());
+    }
+    let path = part.to_path_buf();
+    // Tokio's own: the download already runs on the Tokio runtime Tauri starts.
+    tokio::task::spawn_blocking(move || -> std::io::Result<Sha256> {
+        let mut hasher = Sha256::new();
+        let mut file = std::fs::File::open(&path)?.take(len);
+        let mut buf = vec![0u8; 4 * 1024 * 1024];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok(hasher)
+    })
+    .await
+    .map_err(|e| Stop::Failed(e.to_string()))?
+    .map_err(|e| Stop::Failed(e.to_string()))
 }
 
 fn retry_exhausted() -> String {
     format!("The download kept failing ({MAX_RETRIES} tries). Your progress is kept -- press Continue to try again later.")
 }
 
-/// Waits before the next try; false once the retry budget is spent. Returns
-/// early (true) if the player pauses meanwhile -- the caller then sees the
-/// stop flag.
+/// Waits before a file's next try; false once its retry budget is spent.
+/// Returns early (true) if the player pauses meanwhile -- the caller then sees
+/// the stop flag. The other files keep downloading meanwhile.
 async fn backoff(ctx: &Ctx, retries: &mut u32, why: String) -> bool {
     *retries += 1;
     if *retries > MAX_RETRIES {
         return false;
     }
     let wait = (2u64 << (*retries - 1).min(4)).min(30);
-    for left in (1..=wait).rev() {
+    ctx.set(|s| {
+        s.retries = s.retries.max(*retries);
+        s.message = format!("{why} -- retrying in {wait} s (try {}/{MAX_RETRIES})", *retries);
+    });
+    ctx.emit();
+    for _ in 0..wait {
         if ctx.stopped() {
             return true;
         }
-        ctx.set(|s| {
-            s.speed = 0.0;
-            s.eta_secs = None;
-            s.retries = *retries;
-            s.message = format!("{why} -- retrying in {left} s (try {}/{MAX_RETRIES})", *retries);
-        });
-        ctx.emit();
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     true
-}
-
-async fn verify(ctx: &Ctx, part: &Path, total: u64, expected: &str) -> std::result::Result<(), Stop> {
-    ctx.set(|s| {
-        s.phase = Phase::Verifying;
-        s.done = 0;
-        s.total = total;
-        s.speed = 0.0;
-        s.message = "Checking the download against archive.org's checksum...".into();
-    });
-    ctx.emit();
-
-    let status = ctx.status.clone();
-    let stop = ctx.stop.clone();
-    let path = part.to_path_buf();
-    let app = ctx.app.clone();
-    let dir = ctx.dir.clone();
-    let digest = tauri::async_runtime::spawn_blocking(move || -> std::result::Result<Option<String>, String> {
-        use md5::{Digest, Md5};
-        let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-        let mut hasher = Md5::new();
-        let mut buf = vec![0u8; 8 * 1024 * 1024];
-        let mut done = 0u64;
-        let mut meter = Meter::new();
-        let mut last = Instant::now();
-        loop {
-            if stop.load(Ordering::SeqCst) {
-                return Ok(None);
-            }
-            let n = f.read(&mut buf).map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            done += n as u64;
-            meter.add(n as u64);
-            if last.elapsed() >= EMIT_EVERY {
-                last = Instant::now();
-                let speed = meter.rate();
-                let mut st = status.lock().expect("download status");
-                st.done = done;
-                st.speed = speed;
-                st.eta_secs = eta(total.saturating_sub(done), speed);
-                let mut snap = st.clone();
-                drop(st);
-                snap.free_bytes = free_space(&dir);
-                let _ = app.emit("download:status", snap);
-            }
-        }
-        Ok(Some(hex(&hasher.finalize())))
-    })
-    .await
-    .map_err(|e| Stop::Failed(e.to_string()))?
-    .map_err(Stop::Failed)?;
-
-    match digest {
-        None => Err(Stop::Paused),
-        Some(d) if d == expected => Ok(()),
-        Some(d) => {
-            let _ = std::fs::remove_file(part);
-            Err(Stop::Failed(format!(
-                "The download is damaged (checksum {d}, expected {expected}) and was deleted. Press Download to fetch it again."
-            )))
-        }
-    }
-}
-
-// ------------------------------------------------------------- extraction ---
-
-/// 7-Zip compiled into the launcher (see build.rs / resources/README.md).
-#[cfg(has_7za)]
-const SEVEN_ZIP: &[u8] = include_bytes!("../resources/7za.exe");
-#[cfg(not(has_7za))]
-const SEVEN_ZIP: &[u8] = &[];
-
-/// The 7-Zip executable to use: the embedded one (written once to the config
-/// dir), else a normal 7-Zip installation.
-fn seven_zip(config_dir: &Path) -> Option<PathBuf> {
-    if !SEVEN_ZIP.is_empty() {
-        let path = config_dir.join("tools").join("7za.exe");
-        let current = std::fs::read(&path).map(|b| b == SEVEN_ZIP).unwrap_or(false);
-        if current {
-            return Some(path);
-        }
-        if std::fs::create_dir_all(path.parent()?).is_ok() && std::fs::write(&path, SEVEN_ZIP).is_ok() {
-            return Some(path);
-        }
-    }
-    for base in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
-        if let Ok(pf) = std::env::var(base) {
-            let p = Path::new(&pf).join("7-Zip").join("7z.exe");
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-    }
-    None
-}
-
-fn command(exe: &Path) -> std::process::Command {
-    #[cfg_attr(not(windows), allow(unused_mut))]
-    let mut c = std::process::Command::new(exe);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        c.creation_flags(CREATE_NO_WINDOW);
-    }
-    c
-}
-
-/// Total unpacked size, from the summary line of `7z l`.
-fn unpacked_size(exe: &Path, archive: &Path) -> Option<u64> {
-    let out = command(exe).arg("l").arg("-bd").arg(archive).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    // The summary is the last line that starts with a date column or blanks
-    // and has "files" in it:  "2022-11-14 10:00:00   61234567890  29712345678  1234 files, 56 folders"
-    let line = text.lines().rev().find(|l| l.contains(" files"))?;
-    line.split_whitespace().find_map(|tok| tok.parse::<u64>().ok().filter(|n| *n > 1024))
-}
-
-async fn extract(ctx: &Ctx, archive: &Path, archive_size: u64) -> std::result::Result<PathBuf, Stop> {
-    let exe = seven_zip(&ctx.config_dir).ok_or_else(|| {
-        Stop::Failed(
-            "No 7-Zip found to unpack the game. Install 7-Zip from 7-zip.org and press Continue -- the download is kept."
-                .into(),
-        )
-    })?;
-
-    ctx.set(|s| {
-        s.phase = Phase::Extracting;
-        s.done = 0;
-        s.total = 0;
-        s.speed = 0.0;
-        s.eta_secs = None;
-        s.message = "Reading the archive...".into();
-    });
-    ctx.emit();
-
-    // Exact space check now that the real unpacked size can be read.
-    let exe_l = exe.clone();
-    let arch_l = archive.to_path_buf();
-    let unpacked = tauri::async_runtime::spawn_blocking(move || unpacked_size(&exe_l, &arch_l))
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or((archive_size as f64 * UNPACKED_ESTIMATE) as u64);
-    ctx.set(|s| {
-        s.total = unpacked;
-        s.needed_bytes = Some(archive_size + unpacked);
-    });
-    if let Some(free) = free_space(&ctx.dir) {
-        if free < unpacked + SPACE_MARGIN {
-            return Err(Stop::Failed(format!(
-                "Not enough space to unpack: {} free, {} needed. Free some space and press Continue -- the download is kept.",
-                gb(free),
-                gb(unpacked + SPACE_MARGIN)
-            )));
-        }
-    }
-
-    let status = ctx.status.clone();
-    let stop = ctx.stop.clone();
-    let app = ctx.app.clone();
-    let dir = ctx.dir.clone();
-    let arch = archive.to_path_buf();
-    let result = tauri::async_runtime::spawn_blocking(move || -> std::result::Result<bool, String> {
-        // -bsp1: progress to stdout; -bso0: no file list; -aoa: overwrite, so a
-        // re-run after an interrupted extraction just completes it.
-        let mut child = command(&exe)
-            .arg("x")
-            .arg(&arch)
-            .arg(format!("-o{}", dir.display()))
-            .args(["-y", "-aoa", "-bso0", "-bsp1", "-bse2"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("could not start 7-Zip: {e}"))?;
-        let mut out = child.stdout.take().ok_or("7-Zip gave no output")?;
-        let started = Instant::now();
-        let mut buf = [0u8; 4096];
-        let mut pending = String::new();
-        let mut last = Instant::now();
-        loop {
-            if stop.load(Ordering::SeqCst) {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Ok(false);
-            }
-            let n = out.read(&mut buf).map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
-            }
-            pending.push_str(&String::from_utf8_lossy(&buf[..n]));
-            // 7-Zip redraws its progress line with backspaces / CR.
-            let mut pct = None;
-            for piece in pending.split(|c| c == '\r' || c == '\n' || c == '\u{8}') {
-                if let Some(p) = piece.trim_start().split('%').next().and_then(|s| s.trim().parse::<u64>().ok()) {
-                    if p <= 100 && piece.contains('%') {
-                        pct = Some(p);
-                    }
-                }
-            }
-            if let Some(tail) = pending.rfind(|c| c == '\r' || c == '\n' || c == '\u{8}') {
-                pending = pending[tail + 1..].to_string();
-            }
-            if let Some(p) = pct {
-                if last.elapsed() >= EMIT_EVERY {
-                    last = Instant::now();
-                    let mut st = status.lock().expect("download status");
-                    let total = st.total.max(1);
-                    let done = total * p / 100;
-                    let secs = started.elapsed().as_secs_f64().max(1.0);
-                    let speed = done as f64 / secs;
-                    st.done = done;
-                    st.speed = speed;
-                    st.eta_secs = eta(total.saturating_sub(done), speed);
-                    st.message = "Unpacking...".into();
-                    let mut snap = st.clone();
-                    drop(st);
-                    snap.free_bytes = free_space(&dir);
-                    let _ = app.emit("download:status", snap);
-                }
-            }
-        }
-        let mut err = String::new();
-        if let Some(mut e) = child.stderr.take() {
-            let _ = e.read_to_string(&mut err);
-        }
-        let code = child.wait().map_err(|e| e.to_string())?;
-        if !code.success() {
-            let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
-            return Err(format!("7-Zip failed (exit {}): {first}", code.code().unwrap_or(-1)));
-        }
-        Ok(true)
-    })
-    .await
-    .map_err(|e| Stop::Failed(e.to_string()))?
-    .map_err(|e| Stop::Failed(format!("{e}. The download is kept -- press Continue to try unpacking again.")))?;
-
-    if !result {
-        return Err(Stop::Paused);
-    }
-
-    let root = find_install_root(&ctx.dir).ok_or_else(|| {
-        Stop::Failed(format!(
-            "Unpacked, but no {} with BravoHotelGame and Engine folders was found under {}. \
-             Set the install folder by hand in Settings.",
-            crate::game::GAME_EXE,
-            ctx.dir.display()
-        ))
-    })?;
-    Ok(flatten_into(&root, &ctx.dir))
-}
-
-/// The archive wraps the game in `Manifest #2065353802481281242\` and carries
-/// a `.DepotDownloader\` bookkeeping folder. Move the game up into the folder
-/// the player chose, so it lands exactly where they asked, and drop the
-/// DepotDownloader leftovers.
-///
-/// Renames only (same volume, instant, no copy). Anything that cannot be moved
-/// -- a name that already exists in the target, a locked file -- leaves the
-/// game where it is and returns that folder instead: an untidy install that
-/// works beats a half-moved one. Returns the folder the game is in afterwards.
-fn flatten_into(root: &Path, target: &Path) -> PathBuf {
-    let _ = std::fs::remove_dir_all(root.join(".DepotDownloader"));
-    if root == target || !root.starts_with(target) {
-        return root.to_path_buf();
-    }
-    let entries: Vec<PathBuf> = match std::fs::read_dir(root) {
-        Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
-        Err(_) => return root.to_path_buf(),
-    };
-    // All or nothing: refuse if any name is already taken in the target.
-    if entries.iter().any(|p| p.file_name().map_or(true, |n| target.join(n).exists())) {
-        return root.to_path_buf();
-    }
-    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for from in &entries {
-        let to = target.join(from.file_name().expect("checked above"));
-        if std::fs::rename(from, &to).is_err() {
-            // Put back what already moved, keep the original layout.
-            for (orig, now) in moved.iter().rev() {
-                let _ = std::fs::rename(now, orig);
-            }
-            return root.to_path_buf();
-        }
-        moved.push((from.clone(), to));
-    }
-    // The now-empty wrapper folder(s) between target and root.
-    let mut dir = root.to_path_buf();
-    while dir != target && std::fs::remove_dir(&dir).is_ok() {
-        match dir.parent() {
-            Some(p) => dir = p.to_path_buf(),
-            None => break,
-        }
-    }
-    target.to_path_buf()
 }
 
 /// Where the game already is in `dir` (or a few folders below it), for the
@@ -945,10 +1147,10 @@ pub fn find_game(dir: &str) -> Option<String> {
     find_install_root(path).map(|p| p.to_string_lossy().into_owned())
 }
 
-/// The folder that holds the game (the archive may wrap it in one or two
-/// folders of its own). Breadth-first, four levels deep, skipping our temp dir,
-/// and at most MAX_SCAN folders: a whole drive typed into the folder box must
-/// not turn into minutes of disk crawling.
+/// The folder that holds the game (a copy may sit in a folder or two of its
+/// own). Breadth-first, four levels deep, skipping our temp dir, and at most
+/// MAX_SCAN folders: a whole drive typed into the folder box must not turn
+/// into minutes of disk crawling.
 fn find_install_root(dir: &Path) -> Option<PathBuf> {
     const MAX_SCAN: usize = 4000;
     let mut seen = 0;
@@ -979,8 +1181,24 @@ fn find_install_root(dir: &Path) -> Option<PathBuf> {
 
 // ---------------------------------------------------------------- helpers ---
 
-fn part_path(dir: &Path) -> PathBuf {
-    dir.join(TEMP_DIR).join(format!("{FILE_NAME}.part"))
+fn file_len(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// The bytes of the downloads waiting in `temp` (`<sha256>.part` files), or
+/// None when there are none.
+fn parts_on_disk(temp: &Path) -> Option<u64> {
+    let mut found = None;
+    for entry in std::fs::read_dir(temp).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_part = name
+            .strip_suffix(".part")
+            .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()));
+        if is_part {
+            *found.get_or_insert(0) += entry.metadata().map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    found
 }
 
 fn load_saved(config_dir: &Path) -> Saved {
@@ -1103,6 +1321,18 @@ impl Drop for KeepAwake {
 mod tests {
     use super::*;
 
+    fn sha(bytes: &[u8]) -> String {
+        hex(&Sha256::digest(bytes))
+    }
+
+    fn entry(path: &str, body: &[u8]) -> GameFile {
+        GameFile { path: path.into(), size: body.len() as u64, sha256: sha(body) }
+    }
+
+    fn list(files: Vec<GameFile>) -> GameList {
+        GameList { files }
+    }
+
     #[test]
     fn eta_needs_a_speed() {
         assert_eq!(eta(1000, 0.0), None);
@@ -1110,39 +1340,226 @@ mod tests {
     }
 
     #[test]
-    fn the_url_is_the_encoded_file_name() {
-        assert!(FILE_URL.ends_with(&FILE_NAME.replace(' ', "%20").replace('#', "%23")));
-    }
-
-    #[test]
     fn a_saved_state_without_fields_still_loads() {
         let s: Saved = serde_json::from_str("{}").unwrap();
-        assert!(s.dir.is_empty() && !s.verified);
+        assert!(s.dir.is_empty() && s.total == 0);
+        // The archive.org launcher's state file still loads.
+        let old: Saved = serde_json::from_str(r#"{"dir":"D:\\SP","total":5,"md5":"ab","verified":true}"#).unwrap();
+        assert_eq!(old.dir, "D:\\SP");
     }
 
     #[test]
-    fn the_wrapper_folder_is_flattened_and_depot_leftovers_removed() {
+    fn paths_stay_inside_the_game_folder() {
+        for ok in ["BravoHotelClient.exe", "BravoHotelGame/Content/Paks/pakchunk0-WindowsClient.pak", "Engine/a b/c.dll"] {
+            assert!(safe_path(ok), "{ok}");
+        }
+        for bad in ["", "/etc/x", "../x", "a/../../x", "a//b", "C:/x", "a\\b", "a/./b", "a/b.", "a/b ", "a/b?"] {
+            assert!(!safe_path(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_list_is_checked_before_use() {
+        let exe = entry(crate::game::GAME_EXE, b"exe");
+        assert!(check_list(&list(vec![exe.clone()])).is_ok());
+
+        let mut bad_hash = entry("a.pak", b"a");
+        bad_hash.sha256 = "ABC".into();
+        assert!(check_list(&list(vec![exe.clone(), bad_hash])).is_err(), "bad checksum");
+
+        let twice = list(vec![exe.clone(), entry("A.pak", b"a"), entry("a.PAK", b"b")]);
+        assert!(check_list(&twice).is_err(), "one file twice (Windows ignores case)");
+
+        assert!(check_list(&list(vec![entry("a.pak", b"a")])).is_err(), "no exe");
+        assert!(check_list(&list(vec![exe, entry("../evil.dll", b"x")])).is_err(), "path out of the folder");
+    }
+
+    #[test]
+    fn urls_are_encoded_part_by_part() {
+        assert_eq!(
+            file_url("https://h/raw/k/b/game/", "Engine/Some Dir/a#1.pak"),
+            "https://h/raw/k/b/game/Engine/Some%20Dir/a%231.pak"
+        );
+    }
+
+    #[test]
+    fn only_missing_files_are_fetched_biggest_first_exe_last() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("Manifest #2065353802481281242");
+        let root = tmp.path();
         std::fs::create_dir_all(root.join("BravoHotelGame")).unwrap();
-        std::fs::create_dir_all(root.join("Engine")).unwrap();
-        std::fs::create_dir_all(root.join(".DepotDownloader")).unwrap();
-        std::fs::write(root.join(crate::game::GAME_EXE), b"x").unwrap();
-        let got = flatten_into(&root, tmp.path());
-        assert_eq!(got, tmp.path());
-        assert!(crate::game::detect(&tmp.path().to_string_lossy()).installed);
-        assert!(!root.exists());
-        assert!(!tmp.path().join(".DepotDownloader").exists());
+        std::fs::write(root.join("BravoHotelGame/here.pak"), b"12345").unwrap();
+        std::fs::write(root.join("BravoHotelGame/short.pak"), b"12").unwrap();
+        let files = vec![
+            entry(crate::game::GAME_EXE, b"exe-exe-exe-exe"),
+            entry("BravoHotelGame/here.pak", b"12345"),
+            entry("BravoHotelGame/short.pak", b"12345"),
+            entry("BravoHotelGame/new.pak", b"1234567"),
+        ];
+        let jobs: Vec<String> = missing(root, &files).into_iter().map(|f| f.path).collect();
+        assert_eq!(jobs, ["BravoHotelGame/new.pak", "BravoHotelGame/short.pak", crate::game::GAME_EXE]);
     }
 
     #[test]
-    fn a_name_clash_leaves_the_game_where_it_is() {
+    fn only_our_parts_count_as_progress() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("wrap");
-        std::fs::create_dir_all(root.join("Engine")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("Engine")).unwrap();
-        assert_eq!(flatten_into(&root, tmp.path()), root);
-        assert!(root.join("Engine").exists());
+        assert_eq!(parts_on_disk(tmp.path()), None);
+        std::fs::write(tmp.path().join(OLD_ARCHIVE_PART), b"old archive").unwrap();
+        assert_eq!(parts_on_disk(tmp.path()), None);
+        std::fs::write(tmp.path().join(format!("{}.part", "a".repeat(64))), b"1234").unwrap();
+        assert_eq!(parts_on_disk(tmp.path()), Some(4));
+    }
+
+    // ---- a real download from a small local server ----------------------
+
+    /// Serves `files` over plain HTTP with `Range`, like the bucket. The first
+    /// answer for `cut` stops halfway, like a dropped connection.
+    async fn serve(files: Vec<(String, Vec<u8>)>, cut: Option<String>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cut = Arc::new(Mutex::new(cut));
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let files = files.clone();
+                let cut = cut.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = req.split_whitespace().nth(1).unwrap_or("/").trim_start_matches("/game/").to_string();
+                    let Some((_, body)) = files.iter().find(|(p, _)| file_url("", p) == path) else {
+                        let _ = sock.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                        return;
+                    };
+                    let from: usize = req
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=").map(|r| r.trim_end_matches('-').to_string()))
+                        .and_then(|r| r.parse().ok())
+                        .unwrap_or(0);
+                    let rest = &body[from..];
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {from}-{}/{}\r\nConnection: close\r\n\r\n",
+                        rest.len(),
+                        body.len() - 1,
+                        body.len()
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let drop_now = cut.lock().unwrap().as_deref() == Some(path.as_str());
+                    if drop_now {
+                        *cut.lock().unwrap() = None;
+                        let _ = sock.write_all(&rest[..rest.len() / 2]).await;
+                        return; // connection closes halfway
+                    }
+                    let _ = sock.write_all(rest).await;
+                });
+            }
+        });
+        format!("http://{addr}/game/")
+    }
+
+    fn test_ctx(dir: &Path) -> Ctx {
+        Ctx {
+            tell: Arc::new(|_| {}),
+            status: Arc::new(Mutex::new(Status::idle(dir.to_string_lossy().into_owned()))),
+            stop: Arc::new(AtomicBool::new(false)),
+            config_dir: dir.join("config"),
+            dir: dir.to_path_buf(),
+        }
+    }
+
+    #[tokio::test]
+    async fn downloads_resumes_checks_and_places_every_file() {
+        let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let bodies = vec![
+            (crate::game::GAME_EXE.to_string(), b"MZ the exe".to_vec()),
+            ("BravoHotelGame/Content/Paks/big one.pak".to_string(), big.clone()),
+            ("Engine/Binaries/x.dll".to_string(), b"dll".to_vec()),
+        ];
+        let base = serve(bodies.clone(), Some(file_url("", "BravoHotelGame/Content/Paks/big one.pak"))).await;
+        let files: Vec<GameFile> = bodies.iter().map(|(p, b)| entry(p, b)).collect();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let temp = tmp.path().join(TEMP_DIR);
+        // Half of the big file was already downloaded by an earlier run.
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(part_path(&temp, &files[1]), &big[..1000]).unwrap();
+
+        let jobs = missing(tmp.path(), &files);
+        let client = http_client().unwrap();
+        let result = fetch_all(&ctx, &client, &Source::Base(base.clone()), tmp.path(), &temp, &jobs, 1000).await;
+        assert!(result.is_ok(), "{:?}", result.err().map(|e| match e {
+            Stop::Failed(m) => m,
+            Stop::Paused => "paused".into(),
+        }));
+        for (path, body) in &bodies {
+            assert_eq!(&std::fs::read(tmp.path().join(path)).unwrap(), body, "{path}");
+        }
+        assert!(crate::game::detect(&tmp.path().to_string_lossy()).installed);
+        let st = ctx.status.lock().unwrap().clone();
+        assert_eq!(st.done, st.total);
+    }
+
+    #[tokio::test]
+    async fn a_damaged_file_is_never_put_in_place() {
+        let bodies = vec![("BravoHotelGame/a.pak".to_string(), b"the real bytes".to_vec())];
+        let base = serve(bodies, None).await;
+        let mut wrong = entry("BravoHotelGame/a.pak", b"the real bytes");
+        wrong.sha256 = sha(b"other bytes");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let temp = tmp.path().join(TEMP_DIR);
+        // Pause after the first failed check instead of waiting out 25 tries.
+        let stop = ctx.stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            stop.store(true, Ordering::SeqCst);
+        });
+        let client = http_client().unwrap();
+        let result = fetch_all(&ctx, &client, &Source::Base(base.clone()), tmp.path(), &temp, &[wrong], 0).await;
+        assert!(matches!(result, Err(Stop::Paused)));
+        assert!(!tmp.path().join("BravoHotelGame/a.pak").exists());
+        assert!(ctx.status.lock().unwrap().message.contains("arrived damaged"));
+    }
+
+    #[tokio::test]
+    async fn a_file_the_server_does_not_have_fails_at_once() {
+        let base = serve(vec![], None).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let client = http_client().unwrap();
+        let job = entry("BravoHotelGame/gone.pak", b"x");
+        let result = fetch_all(&ctx, &client, &Source::Base(base.clone()), tmp.path(), &tmp.path().join(TEMP_DIR), &[job], 0).await;
+        assert!(matches!(result, Err(Stop::Failed(m)) if m.contains("does not have")));
+    }
+
+    #[tokio::test]
+    async fn verify_finds_damaged_files_of_the_right_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("BravoHotelGame")).unwrap();
+        std::fs::write(tmp.path().join("BravoHotelGame/good.pak"), b"good bytes").unwrap();
+        std::fs::write(tmp.path().join("BravoHotelGame/bad.pak"), b"BAD  bytes").unwrap();
+        let files = vec![
+            entry("BravoHotelGame/good.pak", b"good bytes"),
+            entry("BravoHotelGame/bad.pak", b"good bytes"),
+            entry("BravoHotelGame/gone.pak", b"not here"),
+        ];
+        let missing_now = missing(tmp.path(), &files);
+        assert_eq!(missing_now.len(), 1, "only the absent file is missing by size");
+        let ctx = test_ctx(tmp.path());
+        let damaged: Vec<String> =
+            damaged(&ctx, tmp.path(), &files, &missing_now).await.ok().unwrap().into_iter().map(|f| f.path).collect();
+        assert_eq!(damaged, ["BravoHotelGame/bad.pak"]);
+    }
+
+    #[test]
+    fn the_limit_message_says_how_long() {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        assert!(limit_reached(Some(now + 23 * 3_600_000 + 60_000)).contains("about 24 hours"));
+        assert!(limit_reached(Some(now + 10 * 60_000)).contains("about an hour"));
+        assert!(limit_reached(None).contains("about 24 hours"));
     }
 
     #[test]
@@ -1197,8 +1614,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("SUPER PEOPLE");
         fake_game(&root);
-        remove_game(&root).unwrap();
+        assert_eq!(footprint(&root.to_string_lossy()), Footprint { files: 2, bytes: 2 });
+        let mut seen = Vec::new();
+        remove_game(&root, &mut |done, total| seen.push((done, total))).unwrap();
         assert!(!root.exists());
+        assert_eq!(seen, [(1, 2), (2, 2)], "each file, the exe last");
     }
 
     #[test]
@@ -1209,7 +1629,7 @@ mod tests {
         std::fs::create_dir_all(root.join("Screenshots")).unwrap();
         std::fs::write(root.join("notes.txt"), b"mine").unwrap();
         std::fs::create_dir_all(root.join(TEMP_DIR)).unwrap();
-        remove_game(root).unwrap();
+        remove_game(root, &mut |_, _| {}).unwrap();
         for gone in ["BravoHotelGame", "Engine", ".DepotDownloader", crate::game::GAME_EXE] {
             assert!(!root.join(gone).exists(), "{gone} is left");
         }

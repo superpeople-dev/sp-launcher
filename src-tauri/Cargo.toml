@@ -27,9 +27,8 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs", "io-util"] }
 
-# Download tab (download.rs): streaming body, MD5 check
-futures-util = { version = "0.3", default-features = false }
-md-5 = "0.10"
+# Download tab (download.rs): streaming bodies, several files at once; SHA-256
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 sha2 = "0.10.9"
 
 # loopback session gateway

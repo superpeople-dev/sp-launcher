@@ -727,7 +727,6 @@ html, body, #root{
 .bigprogress__fill{
   height:100%; width:42%;
   background: linear-gradient(90deg, #650d07, var(--signal) 52%, #ff9c90);
-  box-shadow: 0 0 14px rgba(255,109,94,0.55);
   transition: width .4s ease;
 }
 .bigprogress__file{

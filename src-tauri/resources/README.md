@@ -32,19 +32,3 @@ ships without them, and logs `this launcher has no DLL bundled` at launch.
 They are deliberately not in version control: they are build artifacts of
 sp-native, and a stale copy committed by accident is worse than no copy.
 
-## 7za.exe  — recommended before shipping a release
-
-The Download tab (`src/download.rs`) unpacks the game archive with 7-Zip.
-`build.rs` embeds `resources/7za.exe` when it is present (same `include_bytes!`
-pattern as the DLL above) and the launcher writes it to
-`%APPDATA%\com.superpeople.launcher\tools\7za.exe` the first time it
-unpacks. Without it the launcher falls back to an installed 7-Zip
-(`C:\Program Files\7-Zip\7z.exe`) and tells the player to install 7-Zip
-if there is none.
-
-To get it: download the "7-Zip Extra" package (`7z....-extra.7z`) from
-https://www.7-zip.org/download.html, open it with 7-Zip, and copy
-`x64\7za.exe` here. 7za is LGPL-licensed; shipping it inside the launcher is
-fine, but keep a note of the version in the release notes.
-
-Not in version control for the same reason as the game binaries.

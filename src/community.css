@@ -570,4 +570,13 @@
 .dialog__pickers .pick__current{ flex: 1 1 auto; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dialog__text{ resize: none; font-family: var(--read); font-size: 13px; line-height: 1.5; }
 .dialog__actions{ display:flex; justify-content:flex-end; gap: 8px; margin-top: 12px; }
+
+/* the uninstaller (UninstallDialog.tsx) */
+.uninstall__facts{ display:grid; gap: 8px; margin: 4px 0 12px; }
+.uninstall__facts > div{ display:grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.uninstall__facts dt{ font-size: 11.5px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+.uninstall__facts dd{ margin: 0; font-family: var(--read); font-size: 13px; color: var(--paper); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.uninstall__bar{ margin: 8px 0 4px; }
+.uninstall__error{ margin-top: 8px; }
+.uninstall__done{ margin: 4px 0 0; font-family: var(--read); font-size: 13px; }
 .field__count{ float: right; font-weight: 400; letter-spacing: 0; color: #5d6670; font-family: var(--read); }
