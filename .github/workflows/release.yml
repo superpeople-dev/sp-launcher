@@ -3,7 +3,7 @@ name: Release
 # Every push to main that changes the launcher publishes a signed release, the
 # same build tools/publish-update.ps1 makes by hand: the game binaries of the
 # latest superpeople-dev/sp-native build (both DLLs, the client fixes pak and
-# its .sig) and 7za.exe bundled, the installer signed, latest.json written. The GitHub release holds
+# its .sig) bundled, the installer signed, latest.json written. The GitHub release holds
 # the installer, its .sig and latest.json; launchers from 0.3.4 on read
 # latest.json there first (tauri.conf.json, plugins.updater.endpoints).
 #
@@ -37,12 +37,6 @@ jobs:
     if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
     runs-on: windows-2022
     environment: release
-    env:
-      # 7-Zip Extra 26.03 from 7-Zip's own GitHub releases, checked against the
-      # digest GitHub lists for that file.
-      SEVENZIP_URL: https://github.com/ip7z/7zip/releases/download/26.03/7z2603-extra.7z
-      SEVENZIP_SHA256: 191894e6acb3647ffb69ce630479ff318523b2e2b9890aa7f05c1127c2e59b8f
-
     steps:
       - name: Check the release secrets
         shell: pwsh
@@ -139,19 +133,6 @@ jobs:
         run: |
           cargo test --manifest-path tools/client-fixes-tests/Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Bundle 7za.exe
-        if: steps.version.outputs.skip != 'true'
-        shell: pwsh
-        run: |
-          $archive = Join-Path $env:RUNNER_TEMP '7z-extra.7z'
-          Invoke-WebRequest $env:SEVENZIP_URL -OutFile $archive
-          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
-          if ($hash -ne $env:SEVENZIP_SHA256) { throw "7-Zip Extra does not match its checksum: $hash" }
-          $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue)?.Source ?? "$env:ProgramFiles\7-Zip\7z.exe"
-          & $sevenZip x $archive "-o$env:RUNNER_TEMP\7z-extra" -y | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw '7-Zip Extra could not be unpacked' }
-          Copy-Item -LiteralPath "$env:RUNNER_TEMP\7z-extra\x64\7za.exe" -Destination src-tauri/resources/7za.exe
 
       - name: Build and sign the installer
         if: steps.version.outputs.skip != 'true'

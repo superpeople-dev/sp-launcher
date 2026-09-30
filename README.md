@@ -24,11 +24,14 @@ Rust backend. Windows only.
   `src/components/community/`).
 - **One game folder.** The Settings tab and the Download tab share a single
   "Game folder": pick a folder that already has the game, or download into it.
-- **Download tab.** Downloads the game from the archive.org item
-  `SPShippingDev` (one 27.7 GB 7z). It shows speed and time left, can pause
-  and continue (also across restarts), retries automatically, checks free
-  space and verifies the MD5 before unpacking with 7-Zip. When it finishes,
-  the game folder is set and the archive is deleted (`src-tauri/src/download.rs`).
+- **Download tab.** Downloads the game's files (about 455 files, 30.7 GB)
+  from the team's Storj bucket, twelve at a time. The list of files, with
+  each one's size and SHA-256, comes from superpeople.dev
+  (`/api/launcher/game`), so a file changed in the bucket is refused. It
+  shows speed and time left, can pause and continue (also across restarts),
+  retries automatically, checks free space, and skips the files a folder
+  already has. When it finishes, the game folder is set
+  (`src-tauri/src/download.rs`).
 - **Hosts redirect without running as admin.** The launcher runs as a normal
   user. On the first Play it writes one marked block into the Windows hosts
   file that points the game's `bravohotel.io` hostnames at the backend. This
@@ -131,8 +134,6 @@ Some binaries are embedded at build time and are **not** in the repo. See
   them into `src-tauri/resources` and checks each against the release's
   `manifest.json`. You need `gh` signed in with access to sp-native. They are
   required for a release.
-- `src-tauri/resources/7za.exe` comes from the 7-Zip Extra package. It is
-  recommended.
 
 A fresh clone still compiles without them (`build.rs` only warns).
 
@@ -177,7 +178,7 @@ src-tauri/src/
   hosts.rs                   hosts block, one-time elevation
   shim.rs                    no-Steam DLL install
   engine_ini.rs              Engine.ini patch
-  download.rs                Download tab: archive.org, MD5, 7-Zip, resume
+  download.rs                Download tab: file list, Storj, SHA-256, resume
   discord.rs                 Discord Rich Presence
   news.rs                    news feed
   gateway.rs                 legacy, unused by the UI

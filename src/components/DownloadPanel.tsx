@@ -5,6 +5,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { pickInstallFolder } from "../lib/browse";
 import { bytes, rate } from "../lib/format";
 import type { DownloadStatus } from "../types";
+import { UninstallDialog } from "./UninstallDialog";
 
 /**
  * The Download tab. All real work happens in src-tauri/src/download.rs; this
@@ -19,7 +20,7 @@ interface Props {
   /** The one Game folder setting (config.install_dir), shared with Settings. */
   onFolder: (dir: string) => void;
   onError: (message: string) => void;
-  /** Called once the game is unpacked and the install folder was set. */
+  /** Called once the game is downloaded and the install folder was set. */
   onInstalled: () => void;
   /** Called once Uninstall deleted the game. */
   onUninstalled: () => void;
@@ -30,20 +31,17 @@ const STEP_LABEL: Record<DownloadStatus["phase"], string> = {
   checking: "Checking",
   downloading: "Downloading",
   paused: "Paused",
-  verifying: "Verifying",
-  extracting: "Unpacking",
   done: "Installed",
   failed: "Stopped",
 };
 
-// The four steps shown as a checklist under the bar.
+// The steps shown as a checklist under the bar.
 const STEPS: { phase: DownloadStatus["phase"]; name: string }[] = [
-  { phase: "downloading", name: "Download (27.7 GB from archive.org)" },
-  { phase: "verifying", name: "Verify checksum" },
-  { phase: "extracting", name: "Unpack" },
+  { phase: "checking", name: "Check what the folder already has" },
+  { phase: "downloading", name: "Download and check every file" },
   { phase: "done", name: "Ready to play" },
 ];
-const ORDER: DownloadStatus["phase"][] = ["idle", "checking", "downloading", "verifying", "extracting", "done"];
+const ORDER: DownloadStatus["phase"][] = ["idle", "checking", "downloading", "done"];
 
 function duration(secs: number | null): string {
   if (secs == null || !Number.isFinite(secs)) return "";
@@ -57,7 +55,7 @@ function duration(secs: number | null): string {
 export function DownloadPanel({ installed, installDir, onFolder, onError, onInstalled, onUninstalled }: Props) {
   const [st, setSt] = useState<DownloadStatus | null>(null);
   const [dir, setDir] = useState("");
-  const [removing, setRemoving] = useState(false);
+  const [uninstalling, setUninstalling] = useState(false);
   const [lastActive, setLastActive] = useState<DownloadStatus["phase"]>("idle");
 
   useEffect(() => {
@@ -81,7 +79,7 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
     if (st && ORDER.includes(st.phase)) setLastActive(st.phase);
   }, [st]);
 
-  const active = st != null && ["checking", "downloading", "verifying", "extracting"].includes(st.phase);
+  const active = st != null && ["checking", "downloading"].includes(st.phase);
   const resumable = st != null && (st.phase === "paused" || (st.phase === "failed" && st.done > 0));
   // The game already installed: nothing to download, and no Download button.
   const ready = installed && !active && !resumable;
@@ -111,9 +109,12 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
   const lowSpace = st.free_bytes != null && st.needed_bytes != null && st.free_bytes < st.needed_bytes;
 
   const start = () => void invoke("download_start", { dir }).catch((e) => onError(String(e)));
+  // Verify files, as on Steam: every file's checksum, and the damaged or
+  // missing ones downloaded again.
+  const verify = () => void invoke("download_start", { dir: installDir, verify: true }).catch((e) => onError(String(e)));
   const pause = () => void invoke("download_pause").catch((e) => onError(String(e)));
   const cancel = async () => {
-    const sure = await ask("Stop and delete the partial download? The progress will be lost.", {
+    const sure = await ask("Stop the download? The files not finished yet are deleted; the finished ones are kept.", {
       title: "Cancel download",
       kind: "warning",
     });
@@ -128,24 +129,6 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
     if (picked) {
       setDir(picked);
       onFolder(picked);
-    }
-  };
-  // Deletes the game's own files from the Game folder (see uninstall() in
-  // download.rs); the folder setting stays, so Download puts it back there.
-  const uninstall = async () => {
-    const sure = await ask(
-      `Delete SUPER PEOPLE from ${installDir}?\n\nTo play again you will have to download the game again (27.7 GB). Other files in that folder are kept.`,
-      { title: "Uninstall the game", kind: "warning", okLabel: "Uninstall", cancelLabel: "Keep it" },
-    );
-    if (!sure) return;
-    setRemoving(true);
-    try {
-      await invoke("uninstall_game");
-      onUninstalled();
-    } catch (e) {
-      onError(String(e));
-    } finally {
-      setRemoving(false);
     }
   };
 
@@ -180,7 +163,7 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
               className="input"
               value={dir}
               readOnly={ready}
-              disabled={active || resumable || removing}
+              disabled={active || resumable}
               onChange={(e) => setDir(e.target.value)}
               onBlur={() => dir.trim() && dir.trim() !== installDir && onFolder(dir.trim())}
               spellCheck={false}
@@ -189,13 +172,12 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
               <button
                 className="btn"
                 type="button"
-                disabled={removing}
                 onClick={() => void invoke("open_install_dir").catch((e) => onError(String(e)))}
               >
                 Open folder
               </button>
             ) : (
-              <button className="btn" type="button" disabled={active || resumable || removing} onClick={() => void browse()}>
+              <button className="btn" type="button" disabled={active || resumable} onClick={() => void browse()}>
                 Browse
               </button>
             )}
@@ -203,8 +185,7 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
           {!ready && (
             <span className={`field__hint${lowSpace ? " is-warn" : ""}`}>
               {st.free_bytes != null ? `${bytes(st.free_bytes)} free on this drive` : "Free space unknown"}
-              {st.needed_bytes != null ? ` — about ${bytes(st.needed_bytes)} needed while installing` : " — about 64 GB needed while installing"}
-              {". The download is deleted after unpacking."}
+              {st.needed_bytes != null ? ` — about ${bytes(st.needed_bytes)} needed` : " — about 31 GB needed"}
             </span>
           )}
         </div>
@@ -259,9 +240,14 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
               Continue
             </button>
           ) : ready ? (
-            <button className="btn" type="button" disabled={removing} onClick={() => void uninstall()}>
-              {removing ? "Uninstalling…" : "Uninstall"}
-            </button>
+            <>
+              <button className="btn" type="button" onClick={verify}>
+                Verify files
+              </button>
+              <button className="btn" type="button" onClick={() => setUninstalling(true)}>
+                Uninstall
+              </button>
+            </>
           ) : st.phase === "done" ? null : (
             <button className="btn btn--primary" type="button" disabled={!dir.trim()} onClick={start}>
               {st.phase === "failed" ? "Try again" : "Download"}
@@ -275,10 +261,21 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
         </div>
         <p className="field__hint" style={{ marginTop: 10 }}>
           {ready
-            ? "The game is installed in the folder above. Open folder shows it in File Explorer; Uninstall deletes it."
+            ? "The game is installed in the folder above. Open folder shows it in File Explorer. Verify files checks every file and downloads again the ones that are missing or damaged. Uninstall deletes the game."
             : "You can close the launcher window while it downloads — it keeps going from the tray, and your PC won't go to sleep. If the launcher is quit or the PC restarts, press Continue to resume where it stopped."}
         </p>
       </div>
+
+      {uninstalling && (
+        <UninstallDialog
+          installDir={installDir}
+          onClose={() => setUninstalling(false)}
+          onUninstalled={() => {
+            setUninstalling(false);
+            onUninstalled();
+          }}
+        />
+      )}
     </section>
   );
 }

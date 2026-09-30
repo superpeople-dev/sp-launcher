@@ -691,8 +691,9 @@ fn download_status(state: State<'_, AppState>) -> download::Status {
 }
 
 #[tauri::command]
-fn download_start(app: AppHandle, state: State<'_, AppState>, dir: String) -> Result<()> {
-    download::start(&app, &state.download, dir)
+fn download_start(app: AppHandle, state: State<'_, AppState>, dir: String, verify: Option<bool>) -> Result<()> {
+    let verify = verify.unwrap_or(false);
+    download::start(&app, &state.download, dir, verify, require_session(&state)?)
 }
 
 #[tauri::command]
@@ -727,6 +728,16 @@ async fn find_game(dir: String) -> Option<String> {
     tauri::async_runtime::spawn_blocking(move || download::find_game(&dir))
         .await
         .unwrap_or(None)
+}
+
+/// What Uninstall would delete from the Game folder (files, bytes), for the
+/// uninstall window. Off the UI thread: it walks the whole game.
+#[tauri::command]
+async fn game_footprint(state: State<'_, AppState>) -> Result<download::Footprint> {
+    let dir = state.config.lock().expect("config mutex").install_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || download::footprint(&dir))
+        .await
+        .map_err(|e| LauncherError::Message(e.to_string()))
 }
 
 /// The Download tab's Uninstall: deletes the game from the Game folder
@@ -877,6 +888,7 @@ pub fn run() {
             download_cancel,
             download_default_dir,
             find_game,
+            game_footprint,
             uninstall_game,
         ])
         .run(tauri::generate_context!())
