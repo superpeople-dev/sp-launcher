@@ -8,6 +8,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      native_ref:
+        description: 'Optional sp-native branch/tag/SHA to build and test instead of using the latest release'
+        type: string
+        required: false
 
 concurrency:
   group: unsigned-build-${{ github.ref }}
@@ -29,6 +34,23 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
+
+      # Match the published launcher so the updater does not immediately offer
+      # to replace this test build with the existing signed release.
+      - name: Match the latest released launcher version
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $releaseJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the latest launcher release; refusing to build with a stale version.' }
+          $release = $releaseJson | ConvertFrom-Json
+          $version = $release.tag_name -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Unsupported launcher release tag: $($release.tag_name)" }
+          node tools/set-version.mjs $version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "Unsigned launcher version: $version ($($release.html_url))" >> $env:GITHUB_STEP_SUMMARY
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
@@ -49,6 +71,7 @@ jobs:
       # signed there). A pull request from a fork gets no secrets: it builds
       # without them, as a fresh clone does (build.rs warns).
       - name: Get the game binaries from sp-native
+        if: ${{ !inputs.native_ref }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.SP_NATIVE_TOKEN }}
@@ -58,6 +81,50 @@ jobs:
             exit 0
           }
           ./tools/fetch-binaries.ps1
+
+      # Manual test builds can embed matching native changes before a release.
+      # These binaries are tested here; this never publishes a native release.
+      - name: Check out the requested native source
+        if: ${{ inputs.native_ref }}
+        uses: actions/checkout@v7
+        with:
+          repository: superpeople-dev/sp-native
+          ref: ${{ inputs.native_ref }}
+          token: ${{ secrets.SP_NATIVE_TOKEN }}
+          path: native-source
+          sparse-checkout: |
+            proxy
+            client-fixes
+            pak/release
+
+      - name: Build and test matching native DLLs
+        if: ${{ inputs.native_ref }}
+        shell: pwsh
+        run: |
+          cmake -S native-source/proxy -B native-build/proxy -A x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build native-build/proxy --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir native-build/proxy -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake -S native-source/client-fixes -B native-build/client-fixes -A x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build native-build/client-fixes --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir native-build/client-fixes -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path src-tauri/resources/client-fixes -Force | Out-Null
+          Copy-Item native-build/proxy/Release/XAPOFX1_5.dll src-tauri/resources/
+          Copy-Item native-build/client-fixes/Release/SPClientFixes.dll src-tauri/resources/
+          Copy-Item native-source/pak/release/BravoHotelGame-ClientFixes_P.pak src-tauri/resources/client-fixes/
+          Copy-Item native-source/pak/release/BravoHotelGame-ClientFixes_P.sig src-tauri/resources/client-fixes/
+          $commit = git -C native-source rev-parse HEAD
+          $files = Get-ChildItem src-tauri/resources -Recurse -File | ForEach-Object {
+            @{ name = $_.Name; sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() }
+          }
+          @{ build = 'unsigned-source-build'; commit = $commit; files = @($files) } |
+            ConvertTo-Json -Depth 4 | Set-Content src-tauri/resources/sp-native.json
+          "SP_PROXY_TEST_DRIVER=$((Resolve-Path native-build/proxy/fixture/Release/proxy_loader_fixture.exe).Path)" >> $env:GITHUB_ENV
 
       - name: Check client fixes deployment lifecycle
         shell: pwsh
@@ -76,6 +143,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path artifacts/unsigned -Force | Out-Null
           Copy-Item -LiteralPath src-tauri/target/release/sp-launcher.exe -Destination artifacts/unsigned/
+          if (Test-Path src-tauri/resources/sp-native.json) {
+            Copy-Item src-tauri/resources/sp-native.json artifacts/unsigned/
+          }
 
       - uses: actions/upload-artifact@v7
         with:

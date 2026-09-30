@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod client_fixes;
 mod client_fixes_deployment;
+mod client_fixes_startup;
 mod discord;
 mod download;
 mod engine_ini;
@@ -329,6 +330,9 @@ async fn launch_game(
 
     match shim::apply(&cfg.install_dir) {
         Ok(shim::Applied::NotBundled) => {
+            if cfg.client_fixes_enabled {
+                return Err(LauncherError::Message("This launcher is missing the proxy required to load Client fixes. Download a complete build.".into()));
+            }
             eprintln!("[shim] this launcher has no DLL bundled -- the game needs XAPOFX1_5.dll placed by hand");
         }
         Ok(what) => {
@@ -339,12 +343,13 @@ async fn launch_game(
         Err(e) => return Err(e),
     }
 
-    if cfg.client_fixes_enabled {
-        // The DLL reads this inherited setting after injection. Supply an
-        // explicit zero as well, so an ambient variable cannot open the
-        // console when the saved option is off.
-        let debug_window = if cfg.client_fixes_debug_window { "1" } else { "0" };
-        env.push(("SP_CLIENT_FIXES_CONSOLE".into(), debug_window.into()));
+    // Explicitly override inherited settings even for disabled launches.
+    env.extend(client_fixes_startup::environment(cfg.client_fixes_enabled, cfg.client_fixes_debug_window));
+    let fixes_startup = if cfg.client_fixes_enabled {
+        Some(client_fixes_startup::Startup::new()?)
+    } else { None };
+    if let Some(startup) = &fixes_startup {
+        env.extend(startup.environment());
     }
 
     engine_ini::apply()?;
@@ -379,11 +384,16 @@ async fn launch_game(
         let _ = child.wait();
         return Err(error);
     }
-    if let Some(path) = fixes_session.dll_path() {
-        if let Err(error) = client_fixes::inject(pid, &path) {
+    if let Some(startup) = fixes_startup {
+        let (returned_child, result) = tauri::async_runtime::spawn_blocking(move || {
+            let result = startup.wait(&mut child);
+            (child, result)
+        }).await.map_err(|e| LauncherError::Message(format!("Client fixes startup task failed: {e}")))?;
+        child = returned_child;
+        if let Err(error) = result {
             if let Err(kill_error) = child.kill() {
                 return Err(LauncherError::Message(format!(
-                    "{error}; also could not stop the game after injection failed: {kill_error}"
+                    "{error}; also could not stop the game after Client fixes startup failed: {kill_error}"
                 )));
             }
             let _ = child.wait();
