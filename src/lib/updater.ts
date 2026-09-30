@@ -16,8 +16,9 @@ export async function checkForUpdate(): Promise<Update | null> {
  * Downloads and installs the update. On Windows (the only target this app
  * ships for), `downloadAndInstall` launches the new NSIS installer and exits
  * the current process itself once it's handed off successfully — the
- * installer then restarts the app, so there's nothing left to do after this
- * resolves (if it resolves at all; a successful run typically ends the
+ * installer runs without a window (`installMode: "quiet"` in tauri.conf.json)
+ * and then restarts the app, which brings itself to the front (App.tsx). So
+ * there's nothing left to do after this resolves (if it resolves at all; a successful run typically ends the
  * process from underneath the caller).
  *
  * `onProgress` gets a running byte count as chunks arrive; the total isn't

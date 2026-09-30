@@ -53,7 +53,10 @@
         "https://github.com/superpeople-dev/sp-launcher/releases/latest/download/latest.json",
         "http://64.226.112.204/launcher/updates/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQzQTFCQjc1NTJGQjI4REUKUldUZUtQdFNkYnVoMDFHdE1IMDc0NGNJRXBmekQzYjF4T2ZZWjFLSndlSFlXQ3NodFdEMzh5UkMK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQzQTFCQjc1NTJGQjI4REUKUldUZUtQdFNkYnVoMDFHdE1IMDc0NGNJRXBmekQzYjF4T2ZZWjFLSndlSFlXQ3NodFdEMzh5UkMK",
+      "windows": {
+        "installMode": "quiet"
+      }
     }
   }
 }

@@ -95,6 +95,14 @@ export default function App() {
     void getVersion().then(setAppVersion);
   }, []);
 
+  // The launcher opens in front of the other windows. After an update the
+  // installer starts it from the background, and Windows would otherwise leave
+  // it behind whatever the player had open. Opened by hand it already is in
+  // front, and this does nothing.
+  useEffect(() => {
+    void getCurrentWindow().setFocus().catch(() => {});
+  }, []);
+
   // `quiet` suppresses the error toast for the automatic startup check — a
   // launcher that can't reach its update server should still open normally.
   // A check the user asked for always reports what went wrong, so a dead
