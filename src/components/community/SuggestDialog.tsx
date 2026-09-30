@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { LIMITS, listPlatforms, postIdea, type IdeaKind, type Platform } from "../../lib/community";
+import { LIMITS, loadMeta, postIdea, type IdeaKind, type Platform } from "../../lib/community";
 
 interface Props {
   onClose: () => void;
@@ -15,8 +15,8 @@ export function SuggestDialog({ onClose, onPosted, onError }: Props) {
   const [platforms, setPlatforms] = useState<Platform[]>([]);
   const [platform, setPlatform] = useState("other");
   useEffect(() => {
-    listPlatforms()
-      .then((list) => {
+    loadMeta()
+      .then(({ platforms: list }) => {
         setPlatforms(list);
         const game = list.find((p) => /game/i.test(p.name)) ?? list[0];
         if (game) setPlatform(game.id);
