@@ -135,6 +135,23 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
+      # The same 7-Zip the release bundles (release.yml), so a test build's
+      # Download tab unpacks the game like a player's does.
+      - name: Bundle 7za.exe
+        shell: pwsh
+        env:
+          SEVENZIP_URL: https://github.com/ip7z/7zip/releases/download/26.03/7z2603-extra.7z
+          SEVENZIP_SHA256: 191894e6acb3647ffb69ce630479ff318523b2e2b9890aa7f05c1127c2e59b8f
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP '7z-extra.7z'
+          Invoke-WebRequest $env:SEVENZIP_URL -OutFile $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:SEVENZIP_SHA256) { throw "7-Zip Extra does not match its checksum: $hash" }
+          $sevenZip = (Get-Command 7z -ErrorAction SilentlyContinue)?.Source ?? "$env:ProgramFiles\7-Zip\7z.exe"
+          & $sevenZip x $archive "-o$env:RUNNER_TEMP\7z-extra" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw '7-Zip Extra could not be unpacked' }
+          Copy-Item -LiteralPath "$env:RUNNER_TEMP\7z-extra\x64\7za.exe" -Destination src-tauri/resources/7za.exe
+
       - name: Build Tauri executable without bundling
         run: bun run tauri build --no-bundle
 
