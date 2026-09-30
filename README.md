@@ -10,11 +10,18 @@ Rust backend. Windows only.
 
 ## Features
 
-- **Key sign-in.** Players get a personal launcher key from the Discord bot
-  (`/authkey` or `!authkey`) and enter it once. The key is stored
-  DPAPI-encrypted on the PC and never logged. For every launch the launcher
-  mints a short-lived login ticket and hands it to the game through the
-  environment (`SP_AUTH_TICKET`), never on the command line.
+- **Discord sign-in.** "Connect with Discord" opens superpeople.dev's
+  launcher sign-in in a window of its own; the launcher trades the one-time
+  code it ends on (with a PKCE verifier) for the website's session, stored
+  DPAPI-encrypted on the PC and never logged. For every launch it asks the
+  website for a two-minute game pass, and the backend answers with a
+  short-lived login ticket, handed to the game through the environment
+  (`SP_AUTH_TICKET`), never on the command line (`src-tauri/src/auth.rs`).
+  Launcher keys are retired; a player who had one keeps their account.
+- **Ideas, Roadmap, Completed.** The website's boards inside the launcher:
+  vote, read and write comments, suggest ideas and report bugs as the
+  signed-in Discord account (`src-tauri/src/community.rs`,
+  `src/components/community/`).
 - **One game folder.** The Settings tab and the Download tab share a single
   "Game folder": pick a folder that already has the game, or download into it.
 - **Download tab.** Downloads the game from the archive.org item
@@ -153,16 +160,18 @@ then prints the two `scp` lines for the VPS. The signing key lives in
 
 ```
 src/                         React frontend
-  App.tsx                    tabs, sign-in gate, launch/stop, updater
-  components/                TitleBar (status pill), PlayPanel, DownloadPanel,
-                             SettingsPanel, SignIn, News, LaunchArgs
+  App.tsx                    tabs, welcome screen, launch/stop, updater
+  components/                TitleBar (status pill, profile menu), Welcome,
+                             PlayPanel, DownloadPanel, SettingsPanel, News,
+                             LaunchArgs; community/ for Ideas, Roadmap, Completed
   lib/                       folder picker, formatting, updater glue
   types.ts                   mirrors the Rust structs
   styles.css                 the whole design, one file
 src-tauri/src/
   lib.rs                     Tauri commands, app state, tray
   main.rs                    entry; also the elevated "--sp-hosts" helper mode
-  auth.rs                    key redeem, DPAPI storage, login tickets
+  auth.rs                    Discord sign-in (PKCE), DPAPI storage, game pass
+  community.rs               Ideas/Roadmap/Completed: items, votes, comments
   config.rs                  settings (config.v1.json), atomic writes
   game.rs                    install detection, launching the game
   hosts.rs                   hosts block, one-time elevation

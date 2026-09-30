@@ -9,10 +9,13 @@ import { TitleBar } from "./components/TitleBar";
 import { PlayPanel } from "./components/PlayPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { DownloadPanel } from "./components/DownloadPanel";
-import { SignIn } from "./components/SignIn";
+import { Welcome } from "./components/Welcome";
+import { IdeasPanel } from "./components/community/IdeasPanel";
+import { RoadmapPanel } from "./components/community/RoadmapPanel";
+import { CompletedPanel } from "./components/community/CompletedPanel";
 import { activeNews } from "./news";
 import { checkForUpdate, installUpdate } from "./lib/updater";
-import type { AuthStatus, Config, HostsStatus, InstallState, NewsItem, Phase, Tab } from "./types";
+import type { AuthState, Config, HostsStatus, InstallState, NewsItem, Phase, Profile, Tab } from "./types";
 
 // Re-check which items are in their [starts_at, ends_at) window every so
 // often, so an event that just started (or just ended) updates without the
@@ -29,11 +32,12 @@ export default function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [news, setNews] = useState<NewsItem[]>([]);
 
-  // Sign-in state is kept separate from `config` because it is the backend's
-  // answer, not a setting: the config only remembers it so the window can be
-  // drawn before the first call comes back.
-  const [auth, setAuth] = useState<AuthStatus | null>(null);
-  const [authBusy, setAuthBusy] = useState(false);
+  // The player's Discord account. `undefined` until the Rust side answers, so
+  // a signed-in player never sees the welcome screen flash by; `null` means
+  // not connected, and the welcome screen is all there is.
+  const [profile, setProfile] = useState<Profile | null | undefined>(undefined);
+  const [hadKey, setHadKey] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
   const [appVersion, setAppVersion] = useState("");
@@ -60,15 +64,14 @@ export default function App() {
         return;
       }
 
-      // There's no manifest to download from, so a folder with the game
-      // already in it is the only way to get going — ask for it right away
-      // rather than leaving the user to find the Install button on their own.
-      // A picker that fails or is dismissed must not hold up the UI.
-      // Not fatal: a launcher that cannot reach the backend must still open,
-      // so the gate falls back to "signed out" and says why when they try.
-      void invoke<AuthStatus>("auth_status")
-        .then(setAuth)
-        .catch(() => setAuth({ signed_in: false, account_id: "", display_name: "", status: "" }));
+      // Read from this PC only (no network), so it answers at once. Failing
+      // falls back to the welcome screen rather than an empty window.
+      void invoke<AuthState>("auth_status")
+        .then((a) => {
+          setProfile(a.profile);
+          setHadKey(a.had_key);
+        })
+        .catch(() => setProfile(null));
 
       // No folder picker on first start any more: the Play tab's "Get the game"
       // leads to the Download tab, which holds the one Game folder setting
@@ -178,6 +181,13 @@ export default function App() {
       listen<string>("hosts:recovered", (e) => setNotice(e.payload)),
       listen<string>("hosts:error", (e) => setError(e.payload)),
       listen<string>("game:cleanup-failed", (e) => setError(`Client fixes cleanup failed: ${e.payload}`)),
+      // The website stopped accepting the saved sign-in (lib.rs `expired`):
+      // back to the welcome screen, saying why.
+      listen("auth:expired", () => {
+        setProfile(null);
+        setError(null);
+        setAuthError("Your Discord sign-in has expired. Connect again to continue.");
+      }),
     ];
     return () => {
       unlisten.forEach((p) => void p.then((off) => off()));
@@ -270,28 +280,28 @@ export default function App() {
 
   const phase: Phase = install.installed ? "ready" : "not-installed";
 
-  const redeemKey = async (key: string) => {
-    setAuthBusy(true);
+  // Opens the Discord window and waits until the player is through (or closes
+  // it). The Rust side keeps the session; the profile is all the UI needs.
+  const connect = async () => {
+    setConnecting(true);
     setAuthError(null);
     try {
-      const next = await invoke<AuthStatus>("redeem_key", { key });
-      setAuth(next);
-      // The stored copy changed on the Rust side; pull it back so Settings
-      // shows the account without a restart.
-      setConfig(await invoke<Config>("get_config"));
+      setProfile(await invoke<Profile>("discord_connect"));
+      setHadKey(false);
+      setTab("play");
     } catch (e) {
-      setAuthError(String(e));
+      const message = String(e);
+      if (message !== "cancelled") setAuthError(message);
     } finally {
-      setAuthBusy(false);
+      setConnecting(false);
     }
   };
 
   const signOut = async () => {
     try {
       await invoke("sign_out");
-      setAuth({ signed_in: false, account_id: "", display_name: "", status: "" });
+      setProfile(null);
       setAuthError(null);
-      setConfig(await invoke<Config>("get_config"));
       setTab("play");
     } catch (e) {
       setError(String(e));
@@ -311,14 +321,24 @@ export default function App() {
       <div className="bg__vignette" />
       <div className="bg__grain" />
 
-      <TitleBar tab={tab} onTab={setTab} />
+      <TitleBar tab={tab} onTab={setTab} profile={profile ?? null} onSignOut={() => void signOut()} />
 
       <main className="stage">
-        {tab === "play" && auth && !auth.signed_in && (
-          <SignIn busy={authBusy} error={authError} onRedeem={(k) => void redeemKey(k)} />
+        {profile === null && (
+          <Welcome
+            waiting={connecting}
+            error={authError}
+            hadKey={hadKey}
+            onConnect={() => void connect()}
+            onCancel={() => void invoke("discord_cancel").catch(() => {})}
+          />
         )}
 
-        {tab === "play" && (!auth || auth.signed_in) && (
+        {profile && tab === "ideas" && <IdeasPanel me={profile} onError={setError} onNotice={setNotice} />}
+        {profile && tab === "roadmap" && <RoadmapPanel me={profile} onError={setError} />}
+        {profile && tab === "completed" && <CompletedPanel me={profile} onError={setError} />}
+
+        {profile && tab === "play" && (
           <PlayPanel
             news={activeNews(news)}
             phase={phase}
@@ -332,7 +352,7 @@ export default function App() {
           />
         )}
 
-        {tab === "download" && (
+        {profile && tab === "download" && (
           <DownloadPanel
             installed={install.installed}
             installDir={config.install_dir}
@@ -343,7 +363,7 @@ export default function App() {
           />
         )}
 
-        {tab === "settings" && (
+        {profile && tab === "settings" && (
           <SettingsPanel
             config={config}
             hosts={hosts}
@@ -370,7 +390,7 @@ export default function App() {
             updateChecked={updateChecked}
             updateError={updateError}
             onCheckUpdate={() => runUpdateCheck(false)}
-            auth={auth}
+            profile={profile}
             onSignOut={() => void signOut()}
           />
         )}

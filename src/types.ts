@@ -12,22 +12,25 @@ export interface Config {
   client_fixes_enabled: boolean;
   client_fixes_debug_window: boolean;
 
-  /** DPAPI-encrypted launcher key. Never the key itself. */
-  auth_key_sealed: string;
+  // The sign-in belongs to the Rust side: set_config keeps its own copy of
+  // these whatever the frontend sends.
+  /** DPAPI-encrypted Discord session. Never the session itself. */
+  session_sealed: string;
+  profile: Profile | null;
   /** Identifies this installation; a label, not a secret. */
   device_id: string;
+  /** Left by a retired launcher key sign-in. */
+  auth_key_sealed: string;
   account_id: string;
   display_name: string;
   key_status: string;
 }
 
-/** Mirrors `auth::AuthStatus` in src-tauri/src/auth.rs — keep the two in step. */
-export interface AuthStatus {
-  signed_in: boolean;
-  account_id: string;
-  display_name: string;
-  /** "active", "suspended" or "revoked" as the backend last reported it. */
-  status: string;
+/** Mirrors `auth::AuthState`: read from this PC, no network. */
+export interface AuthState {
+  profile: Profile | null;
+  /** This PC was signed in with a launcher key before Discord login. */
+  had_key: boolean;
 }
 
 export interface InstallState {
@@ -44,7 +47,64 @@ export interface HostsStatus {
   conflicts: string[];
 }
 
-export type Tab = "play" | "download" | "settings";
+export type Tab = "play" | "ideas" | "roadmap" | "completed" | "download" | "settings";
+
+/** The signed-in player, from Discord. Mirrors `auth::Profile`. */
+export interface Profile {
+  /** Discord user id. */
+  id: string;
+  /** Discord display name, or the username when there is none. */
+  name: string;
+  username: string;
+  avatar: string | null;
+}
+
+// ------------------------------------------------------------- community ---
+// The website's Ideas, Roadmap and Completed items (superpeople.dev), as the
+// launcher shows them. Mirrors `community::Item` in src-tauri/src/community.rs.
+
+export type ItemStatus = "open" | "under_review" | "planned" | "in_progress" | "completed" | "closed";
+export type Vote = "up" | "down";
+
+export interface Person {
+  name: string;
+  /** Discord avatar URL; the initial is drawn when there is none. */
+  avatar: string | null;
+}
+
+export interface ItemTag {
+  name: string;
+  color: string;
+}
+
+export interface CommunityItem {
+  id: string;
+  title: string;
+  description: string;
+  status: ItemStatus;
+  /** Upvotes minus downvotes, as on the website. */
+  score: number;
+  myVote: Vote | null;
+  commentCount: number;
+  /** Unix milliseconds. */
+  createdAt: number;
+  completedAt: number | null;
+  tags: ItemTag[];
+  author: Person | null;
+}
+
+export interface CommentReply {
+  id: string;
+  author: Person | null;
+  /** Posted by the SUPER PEOPLE team. */
+  official: boolean;
+  body: string;
+  createdAt: number;
+}
+
+export interface CommunityComment extends CommentReply {
+  replies: CommentReply[];
+}
 
 /** Mirrors `download::Status` in src-tauri/src/download.rs — keep the two in step. */
 export interface DownloadStatus {

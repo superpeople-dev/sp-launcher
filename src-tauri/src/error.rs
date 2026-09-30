@@ -15,6 +15,11 @@ pub enum LauncherError {
 
     #[error("{0}")]
     Message(String),
+
+    /// The website no longer accepts the saved Discord sign-in (expired, or
+    /// signed out elsewhere). lib.rs forgets it and shows the welcome screen.
+    #[error("Your Discord sign-in has expired. Connect again to continue.")]
+    SignedOut,
 }
 
 impl Serialize for LauncherError {
