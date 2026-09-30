@@ -14,6 +14,9 @@
 /* Selected text in the launcher's red, as on the website. */
 ::selection{ background: var(--signal); color: #fff; }
 
+/* Keyboard focus (Tab) in the launcher's red, never the browser's white ring. */
+:focus-visible{ outline: 2px solid var(--signal-hi); outline-offset: 2px; }
+
 /* ---- avatars ---- */
 .avatar{
   flex: 0 0 auto;
@@ -79,7 +82,7 @@
 .discordbtn svg{ width: 24px; height: 24px; }
 /* Colour only on hover: buttons stay where they are. */
 .discordbtn:hover{ background: #4752c4; }
-.discordbtn:focus-visible{ outline: 2px solid #fff; outline-offset: 3px; }
+.discordbtn:focus-visible{ outline: 2px solid var(--signal-hi); outline-offset: 3px; }
 .welcome__waiting{
   display:flex; align-items:center; gap: 10px;
   height: 48px; padding: 0 18px;
