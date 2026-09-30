@@ -581,13 +581,13 @@ html, body, #root{
   border:1px solid var(--line);
   background: rgba(255,255,255,0.05);
   color: var(--paper-dim);
-  transition: background .15s ease, color .15s ease, border-color .15s ease, transform .15s ease;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
 }
 .discord svg{ width:21px; height:21px; }
 .social:hover .social__label{ color: var(--paper); }
+/* Colour only: the button stays where it is. */
 .discord:hover{
   background: #5865f2; border-color:#5865f2; color:#fff;
-  transform: translateY(-2px);
 }
 .discord:focus-visible{ outline:2px solid var(--signal); outline-offset:2px; }
 

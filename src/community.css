@@ -74,11 +74,11 @@
   font-family: var(--font); font-size: 16px; font-weight: 800;
   letter-spacing: 0.10em; text-transform: uppercase;
   cursor: pointer;
-  transition: background .15s ease, transform .15s ease;
+  transition: background .15s ease;
 }
 .discordbtn svg{ width: 24px; height: 24px; }
-.discordbtn:hover{ background: #4752c4; transform: translateY(-1px); }
-.discordbtn:active{ transform: translateY(0); }
+/* Colour only on hover: buttons stay where they are. */
+.discordbtn:hover{ background: #4752c4; }
 .discordbtn:focus-visible{ outline: 2px solid #fff; outline-offset: 3px; }
 .welcome__waiting{
   display:flex; align-items:center; gap: 10px;
