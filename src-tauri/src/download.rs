@@ -662,9 +662,12 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
     // ---- checking ------------------------------------------------------
     ctx.emit();
     let client = http_client()?;
-    let list = fetch_list(&client)
+    let mut list = fetch_list(&client)
         .await
         .map_err(|e| Stop::Failed(format!("Could not get the list of the game's files from superpeople.dev: {e}")))?;
+    // The startup pictures are the launcher's own (startup_images.rs, written
+    // by `finish`): never fetched, never "repaired" back to the original.
+    list.files.retain(|f| !crate::startup_images::is_ours(&f.path));
 
     let temp = ctx.dir.join(TEMP_DIR);
     let _ = std::fs::remove_file(temp.join(OLD_ARCHIVE_PART));
@@ -897,6 +900,9 @@ async fn damaged(ctx: &Ctx, root: &Path, files: &[GameFile], missing: &[GameFile
 /// debounced writer cannot put the old folder back.
 fn finish(ctx: &Ctx, root: &Path, message: &str) {
     let root_str = root.to_string_lossy().into_owned();
+    if let Err(e) = crate::startup_images::apply(&root_str) {
+        eprintln!("[startup images] {e}");
+    }
     let _ = std::fs::remove_dir_all(ctx.dir.join(TEMP_DIR));
     let _ = std::fs::remove_file(ctx.config_dir.join(STATE_FILE));
     ctx.set(|s| {

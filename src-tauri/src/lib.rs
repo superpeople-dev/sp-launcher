@@ -11,6 +11,7 @@ mod error;
 mod game;
 mod hardware;
 mod shim;
+mod startup_images;
 mod gateway;
 pub mod hosts;
 pub mod news;
@@ -603,6 +604,12 @@ async fn launch_game(
             }
         }
         Err(e) => return Err(e),
+    }
+
+    // The community's startup pictures (startup_images.rs). A picture that
+    // cannot be written is never a reason not to start the game.
+    if let Err(e) = startup_images::apply(&cfg.install_dir) {
+        eprintln!("[startup images] {e}");
     }
 
     // Explicitly override inherited settings even for disabled launches.
