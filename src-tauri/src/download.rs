@@ -46,11 +46,28 @@
 //! the player is, down -- the launcher quietly turns to the backup copy: the
 //! same game in one 7z on archive.org (the list says where, `backup`). Up to
 //! 2 GB still missing (a repair), those files come one by one, unpacked by
-//! archive.org; more, and the whole archive comes down (resumable) and 7-Zip
-//! unpacks only what is missing. Either way every file is checked against the
-//! same list. The website can send launchers there at once (`backup.only`).
-//! It turns to the backup after STORAGE_TRIES tries in a row that brought
-//! nothing, on any file. Nothing on screen says which source it was.
+//! archive.org; more, and the whole archive comes down and 7-Zip unpacks only
+//! what is missing. Either way every file is checked against the same list.
+//! The website can send launchers there at once (`backup.only`). It turns to
+//! the backup after STORAGE_TRIES tries in a row that brought nothing, on any
+//! file. Nothing on screen says which source it was.
+//!
+//! The archive comes down in 64 MB pieces (`backup-<size>.7z.001`, `.002`,
+//! ...: a split archive, which 7-Zip opens as one), eight at a time, spread
+//! over every archive.org server that holds the item (its metadata,
+//! `workable_servers`). archive.org's own link sends everyone to one server
+//! over one connection: 9 MB/s in a test, where its other server gave 29 MB/s
+//! and eight connections over both filled the 50 MB/s line. Each piece
+//! resumes where it stopped; a server that fails hands its piece to the next.
+//!
+//! THE RACE
+//! --------
+//! Where the player is, one source can be much faster than the other. With
+//! more than 2 GB to fetch and the room for the archive, the backup gets a
+//! few seconds first (its pieces are kept), then the storage starts; once the
+//! storage has run a few seconds too, the backup takes over if it would finish
+//! clearly sooner, unpacking included. If the chosen backup then fails, the
+//! storage carries on: files already checked are never fetched twice.
 //!
 //! While a download runs, Windows is asked not to go to sleep
 //! (`SetThreadExecutionState`); the display may still turn off.
@@ -96,9 +113,28 @@ const BACKUP_SINGLE_FILES: u64 = 2 * 1024 * 1024 * 1024;
 const BACKUP_PARALLEL: usize = 4;
 /// archive.org can take a while to start sending a file it unpacks.
 const BACKUP_STALL: Duration = Duration::from_secs(120);
-/// In the backup's temp files: the archive, and where it is unpacked.
-const ARCHIVE_PART: &str = "game.7z.part";
+/// The backup archive's pieces: at least this big, at most 999 of them
+/// (three-digit names).
+const PIECE: u64 = if cfg!(test) { 64 * 1024 } else { 64 * 1024 * 1024 };
+/// Pieces downloaded at once, over all of archive.org's servers. One
+/// connection gave 2 to 29 MB/s in a test; 4 to 16 over both servers, 45 to
+/// 52 MB/s (the line's limit).
+const ARCHIVE_PARALLEL: usize = 8;
+/// The whole archive in one file, as the previous launcher downloaded it.
+const WHOLE_ARCHIVE: &str = "game.7z.part";
+/// Where the backup archive is unpacked, in the temp folder.
 const UNPACK_DIR: &str = "unpacked";
+/// The race (see the top): how long the backup is tried, then how long the
+/// storage runs before the two are compared.
+const PROBE_BACKUP: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(7) };
+const PROBE_STORAGE: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(8) };
+/// 7-Zip's unpacking, counted in the backup's time. The game barely
+/// compresses, so it runs at disk speed (1.8 GB/s on an SSD in a test); this
+/// is a slow hard drive's.
+const UNPACK_SPEED: f64 = 150e6;
+/// The backup takes over only if it would finish in under this share of the
+/// storage's time: it needs the room for the archive, and the unpacking.
+const RACE_MARGIN: f64 = 0.8;
 /// A retry countdown's step (shorter in tests).
 const TICK: Duration = if cfg!(test) { Duration::from_millis(10) } else { Duration::from_secs(1) };
 const EMIT_EVERY: Duration = Duration::from_millis(250);
@@ -329,7 +365,7 @@ pub fn start(app: &AppHandle, dl: &Downloader, dir: String, verify: bool, sessio
                 s.eta_secs = None;
                 s.message = "Paused -- press Continue to resume where it stopped.".into();
             }),
-            Err(stop @ (Stop::Failed(_) | Stop::Backup)) => {
+            Err(stop @ (Stop::Failed(_) | Stop::Backup | Stop::Faster)) => {
                 let msg = match stop {
                     Stop::Failed(msg) => msg,
                     _ => "The download could not be finished. Press Continue to try again -- your progress is kept.".to_string(),
@@ -501,6 +537,8 @@ enum Stop {
     Failed(String),
     /// The storage cannot serve: turn to the backup (never leaves `run`).
     Backup,
+    /// The race: the backup is faster here (never leaves `run`).
+    Faster,
 }
 
 impl<E: std::fmt::Display> From<E> for Stop {
@@ -604,27 +642,52 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
     }
     let started = Instant::now();
     let backup = list.backup.as_ref();
+    // The race's first half: the backup's few seconds (see the top).
+    let race = match backup {
+        Some(b) if !b.only => backup_time(ctx, &client, b, &temp, total - have).await?,
+        _ => None,
+    };
     let storage = if backup.is_some_and(|b| b.only) {
         Err(Stop::Backup)
     } else {
-        fetch_parts(ctx, &client, source, &temp, &jobs, have, backup.is_some()).await
+        fetch_parts(ctx, &client, source, &temp, &jobs, have, backup.is_some(), race.as_ref()).await
     };
+    let unavailable = || Stop::Failed("The game's download server cannot be reached. Try again later -- your progress is kept.".into());
     let from = match storage {
         Ok(()) => "storage",
+        Err(Stop::Faster) => {
+            let backup = backup.ok_or_else(unavailable)?;
+            match from_backup(ctx, &client, backup, &temp, &jobs, 0).await {
+                Ok(()) => "backup",
+                // The backup failed after all: the storage, which was
+                // working, carries on with what is still missing.
+                Err(Stop::Failed(_)) => {
+                    let have = jobs.iter().map(|j| file_len(&part_path(&temp, j)).min(j.size)).sum();
+                    fetch_parts(ctx, &client, source, &temp, &jobs, have, false, None).await?;
+                    "storage"
+                }
+                Err(stop) => return Err(stop),
+            }
+        }
         Err(Stop::Backup) => {
-            let backup = backup.ok_or_else(|| Stop::Failed("The game's download server cannot be reached. Try again later -- your progress is kept.".into()))?;
+            let backup = backup.ok_or_else(unavailable)?;
             from_backup(ctx, &client, backup, &temp, &jobs, BACKUP_SINGLE_FILES).await?;
             "backup"
         }
         Err(stop) => return Err(stop),
     };
     place_all(ctx, &root, &temp, &jobs)?;
+    // Both speeds of the race (bytes per second), when there was one.
+    let speeds = race.as_ref().and_then(|r| {
+        let storage = (*r.storage_speed.lock().expect("race"))?;
+        Some(serde_json::json!({ "storage": storage.round(), "backup": r.backup_speed.min(1e12).round() }))
+    });
     (ctx.tell)(Event::Report(if verify {
-        serde_json::json!({ "action": "verify.repaired", "files": jobs.len(), "bytes": total, "source": from })
+        serde_json::json!({ "action": "verify.repaired", "files": jobs.len(), "bytes": total, "source": from, "speeds": speeds })
     } else {
         // How long it took, when this run did the whole download.
         let seconds = (have == 0).then(|| started.elapsed().as_secs());
-        serde_json::json!({ "action": "download.finished", "files": jobs.len(), "bytes": total, "seconds": seconds, "source": from })
+        serde_json::json!({ "action": "download.finished", "files": jobs.len(), "bytes": total, "seconds": seconds, "source": from, "speeds": speeds })
     }));
 
     // ---- done ----------------------------------------------------------
@@ -926,8 +989,18 @@ fn file_url(base: &str, path: &str) -> String {
     url
 }
 
+/// The race between the storage and the backup (see the top).
+struct Race {
+    /// How long the backup would take for what is left, unpacking included.
+    backup_secs: f64,
+    /// Bytes per second, from its few seconds.
+    backup_speed: f64,
+    /// The storage's, once it has run PROBE_STORAGE.
+    storage_speed: Mutex<Option<f64>>,
+}
+
 /// The download's progress, shared by the files downloading at once.
-struct Progress {
+struct Progress<'a> {
     done: AtomicU64,
     total: u64,
     files_done: AtomicUsize,
@@ -938,9 +1011,33 @@ struct Progress {
     fallback: bool,
     /// The storage gave up: every file stops and the backup takes over.
     to_backup: AtomicBool,
+    /// The race still to judge, and since when the storage has been sending.
+    race: Option<&'a Race>,
+    race_since: Mutex<Option<Instant>>,
+    /// The race went to the backup: it is faster here.
+    faster: AtomicBool,
 }
 
-impl Progress {
+impl Progress<'_> {
+    /// The race's second half: once the storage has sent for PROBE_STORAGE,
+    /// the backup takes over if it would finish in under RACE_MARGIN of the
+    /// storage's time. Judged once.
+    fn judge(&self, done: u64, speed: f64) {
+        let Some(race) = self.race else { return };
+        let mut since = self.race_since.lock().expect("race");
+        let started = *since.get_or_insert_with(Instant::now);
+        let mut measured = race.storage_speed.lock().expect("race");
+        if measured.is_some() || started.elapsed() < PROBE_STORAGE || speed <= 0.0 {
+            return;
+        }
+        *measured = Some(speed);
+        let storage_secs = self.total.saturating_sub(done) as f64 / speed;
+        if race.backup_secs < storage_secs * RACE_MARGIN {
+            self.faster.store(true, Ordering::SeqCst);
+            self.to_backup.store(true, Ordering::SeqCst);
+        }
+    }
+
     /// A file's bytes on disk are now `now` (it was `counted`).
     fn count(&self, counted: &mut u64, now: u64) {
         if now >= *counted {
@@ -969,6 +1066,7 @@ impl Progress {
             s.eta_secs = eta(self.total.saturating_sub(done), speed);
         });
         ctx.emit();
+        self.judge(done, speed);
     }
 
     fn turning_to_backup(&self) -> bool {
@@ -982,7 +1080,9 @@ impl Progress {
 }
 
 /// Every file of `jobs` into its `.part`, checked, several at once. With
-/// `fallback`, gives up as `Stop::Backup` when the storage cannot serve.
+/// `fallback`, gives up as `Stop::Backup` when the storage cannot serve; with
+/// a `race`, as `Stop::Faster` when the backup would be faster.
+#[allow(clippy::too_many_arguments)]
 async fn fetch_parts(
     ctx: &Ctx,
     client: &reqwest::Client,
@@ -991,6 +1091,7 @@ async fn fetch_parts(
     jobs: &[GameFile],
     have: u64,
     fallback: bool,
+    race: Option<&Race>,
 ) -> std::result::Result<(), Stop> {
     use futures_util::StreamExt;
 
@@ -1005,6 +1106,9 @@ async fn fetch_parts(
         last_emit: Mutex::new(Instant::now()),
         fallback: fallback && source.is_storage(),
         to_backup: AtomicBool::new(false),
+        race: race.filter(|_| source.is_storage()),
+        race_since: Mutex::new(None),
+        faster: AtomicBool::new(false),
     };
     ctx.set(|s| {
         s.phase = Phase::Downloading;
@@ -1022,6 +1126,7 @@ async fn fetch_parts(
         match result {
             Ok(()) => {}
             Err(Stop::Paused) => paused = true,
+            Err(Stop::Backup) if progress.faster.load(Ordering::SeqCst) => return Err(Stop::Faster),
             // Dropping the others stops them; their parts are kept.
             Err(failed) => return Err(failed),
         }
@@ -1071,7 +1176,7 @@ async fn fetch_one(
     source: &Source,
     temp: &Path,
     job: &GameFile,
-    progress: &Progress,
+    progress: &Progress<'_>,
 ) -> std::result::Result<(), Stop> {
     let part = part_path(temp, job);
     let name = job.path.rsplit('/').next().unwrap_or(&job.path).to_string();
@@ -1180,7 +1285,7 @@ async fn stream_into(
     size: u64,
     have: &mut u64,
     hasher: &mut Sha256,
-    progress: &Progress,
+    progress: &Progress<'_>,
     counted: &mut u64,
 ) -> std::result::Result<(), Miss> {
     use futures_util::StreamExt;
@@ -1331,11 +1436,12 @@ async fn from_backup(
         // The bar now counts only what is left.
         let source = Source::Archive { url: backup.url.clone(), folder: backup.folder.clone() };
         let have: u64 = left.iter().map(|j| file_len(&part_path(temp, j)).min(j.size)).sum();
-        return fetch_parts(ctx, client, &source, temp, &left, have, false).await;
+        return fetch_parts(ctx, client, &source, temp, &left, have, false, None).await;
     }
 
-    let archive = temp.join(ARCHIVE_PART);
-    let needed = backup.size.saturating_sub(file_len(&archive)) + missing + SPACE_MARGIN;
+    let pieces = Pieces::new(temp, backup.size);
+    pieces.clear_others();
+    let needed = backup.size - pieces.have() + missing + SPACE_MARGIN;
     if let Some(free) = free_space(temp) {
         if free < needed {
             return Err(Stop::Failed(format!(
@@ -1345,9 +1451,9 @@ async fn from_backup(
             )));
         }
     }
-    download_archive(ctx, client, &backup.url, backup.size, &archive).await?;
+    download_archive(ctx, client, &mirrors(client, &backup.url).await, &pieces, None).await?;
     let out = temp.join(UNPACK_DIR);
-    unpack(ctx, &archive, &backup.folder, &left, &out).await?;
+    unpack(ctx, &pieces, &backup.folder, &left, &out).await?;
 
     // Unpacked: each file checked, then it is that file's part.
     for job in &left {
@@ -1363,103 +1469,321 @@ async fn from_backup(
         std::fs::rename(&unpacked, part_path(temp, job))?;
     }
     let _ = std::fs::remove_dir_all(&out);
-    let _ = std::fs::remove_file(&archive);
+    pieces.remove();
     Ok(())
 }
 
-/// The whole backup archive into `archive`, resumed where it stopped. One
-/// connection (archive.org gives one fast stream), retried like any file.
-async fn download_archive(ctx: &Ctx, client: &reqwest::Client, url: &str, size: u64, archive: &Path) -> std::result::Result<(), Stop> {
-    use futures_util::StreamExt;
-    use tokio::io::AsyncWriteExt;
+/// The race's first half (see the top): how long the backup would take here
+/// for the `left` bytes still missing, from a few seconds of its archive (the
+/// pieces stay for later), plus the unpacking. None when it cannot win: a
+/// repair (the storage fetches only those files), no room for the archive, or
+/// archive.org not answering.
+async fn backup_time(ctx: &Ctx, client: &reqwest::Client, backup: &Backup, temp: &Path, left: u64) -> std::result::Result<Option<Race>, Stop> {
+    if left <= BACKUP_SINGLE_FILES {
+        return Ok(None);
+    }
+    std::fs::create_dir_all(temp)?;
+    let pieces = Pieces::new(temp, backup.size);
+    pieces.clear_others();
+    let archive_left = backup.size - pieces.have();
+    if free_space(temp).is_some_and(|free| free < archive_left + left + SPACE_MARGIN) {
+        return Ok(None);
+    }
+    let speed = if archive_left == 0 { f64::INFINITY } else { download_archive(ctx, client, &mirrors(client, &backup.url).await, &pieces, Some(PROBE_BACKUP)).await? };
+    if speed <= 0.0 {
+        return Ok(None);
+    }
+    Ok(Some(Race {
+        backup_secs: archive_left as f64 / speed + left as f64 / UNPACK_SPEED,
+        backup_speed: speed,
+        storage_speed: Mutex::new(None),
+    }))
+}
 
-    let mut retries = 0u32;
-    let mut meter = Meter::new();
-    loop {
-        if ctx.stopped() {
-            return Err(Stop::Paused);
-        }
-        let mut have = file_len(archive);
-        if have > size {
-            std::fs::remove_file(archive)?;
-            have = 0;
-        }
-        if have == size {
-            return Ok(());
-        }
-        ctx.set(|s| {
-            s.phase = Phase::Downloading;
-            s.done = have;
-            s.total = size;
-            if retries == 0 {
-                s.message = if have > 0 { "Resuming...".into() } else { "Downloading...".into() };
-            }
-        });
-        ctx.emit();
+/// The backup archive in the temp folder, as pieces: `backup-<size>.7z.001`,
+/// `.002`, ... (a split archive: 7-Zip opens the first and reads on). The size
+/// in the name keeps another archive's pieces out.
+struct Pieces {
+    temp: PathBuf,
+    size: u64,
+    piece: u64,
+}
 
-        let attempt: std::result::Result<(), String> = async {
-            let resp = client.get(url).header(reqwest::header::RANGE, format!("bytes={have}-")).send().await.map_err(|e| e.to_string())?;
-            let status = resp.status();
-            let mut file = if status == reqwest::StatusCode::PARTIAL_CONTENT {
-                tokio::fs::OpenOptions::new().create(true).append(true).open(archive).await.map_err(|e| e.to_string())?
-            } else if status.is_success() {
-                // The server ignored the range: start over rather than append
-                // a second copy of the beginning.
-                have = 0;
-                tokio::fs::File::create(archive).await.map_err(|e| e.to_string())?
-            } else {
-                return Err(format!("the server answered {status}"));
-            };
-            let mut stream = resp.bytes_stream();
-            let mut last_emit = Instant::now();
-            let mut last_flush = Instant::now();
-            loop {
-                if ctx.stopped() {
-                    break;
-                }
-                let next = tokio::time::timeout(STALL_TIMEOUT, stream.next()).await.map_err(|_| "the connection stalled".to_string())?;
-                let Some(chunk) = next else { break };
-                let chunk = chunk.map_err(|e| e.to_string())?;
-                file.write_all(&chunk).await.map_err(|e| format!("writing to disk failed: {e}"))?;
-                have += chunk.len() as u64;
-                meter.add(chunk.len() as u64);
-                if last_flush.elapsed() > Duration::from_secs(5) {
-                    file.flush().await.map_err(|e| e.to_string())?;
-                    last_flush = Instant::now();
-                }
-                if last_emit.elapsed() >= EMIT_EVERY {
-                    last_emit = Instant::now();
-                    let speed = meter.rate();
-                    ctx.set(|s| {
-                        s.done = have;
-                        s.speed = speed;
-                        s.eta_secs = eta(size.saturating_sub(have), speed);
-                        s.message.clear();
-                    });
-                    ctx.emit();
-                }
+impl Pieces {
+    fn new(temp: &Path, size: u64) -> Self {
+        Pieces { temp: temp.to_path_buf(), size, piece: PIECE.max(size.div_ceil(999)) }
+    }
+    fn count(&self) -> u64 {
+        self.size.div_ceil(self.piece)
+    }
+    fn path(&self, i: u64) -> PathBuf {
+        self.temp.join(format!("backup-{}.7z.{:03}", self.size, i + 1))
+    }
+    fn first(&self) -> PathBuf {
+        self.path(0)
+    }
+    /// Where piece `i` starts in the archive, and its length.
+    fn span(&self, i: u64) -> (u64, u64) {
+        let start = i * self.piece;
+        (start, self.piece.min(self.size - start))
+    }
+    fn have(&self) -> u64 {
+        (0..self.count()).map(|i| file_len(&self.path(i)).min(self.span(i).1)).sum()
+    }
+    /// Other archives' pieces, and the previous launcher's one-file archive.
+    fn clear_others(&self) {
+        let ours = format!("backup-{}.7z.", self.size);
+        let _ = std::fs::remove_file(self.temp.join(WHOLE_ARCHIVE));
+        for entry in std::fs::read_dir(&self.temp).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if is_piece(&name) && !name.starts_with(&ours) {
+                let _ = std::fs::remove_file(entry.path());
             }
-            file.flush().await.map_err(|e| e.to_string())?;
-            Ok(())
+        }
+    }
+    fn remove(&self) {
+        for i in 0..self.count() {
+            let _ = std::fs::remove_file(self.path(i));
+        }
+    }
+}
+
+/// `backup-<size>.7z.<3 digits>`: a piece of the backup archive.
+fn is_piece(name: &str) -> bool {
+    name.strip_prefix("backup-")
+        .and_then(|rest| rest.split_once(".7z."))
+        .is_some_and(|(size, n)| !size.is_empty() && size.bytes().all(|b| b.is_ascii_digit()) && n.len() == 3 && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The archive's address on each archive.org server that holds it (the
+/// item's metadata, `workable_servers`): archive.org's own link sends
+/// everyone to the same one. Just `url` when that cannot be found (or it is
+/// not an archive.org link).
+async fn mirrors(client: &reqwest::Client, url: &str) -> Vec<String> {
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct Meta {
+        dir: String,
+        workable_servers: Vec<String>,
+    }
+    let mut found = Vec::new();
+    if let Some((item, file)) = url.strip_prefix("https://archive.org/download/").and_then(|rest| rest.split_once('/')) {
+        let meta: Option<Meta> = async {
+            let resp = client.get(format!("https://archive.org/metadata/{item}")).timeout(Duration::from_secs(15)).send().await.ok()?;
+            resp.json().await.ok()
         }
         .await;
-
-        match attempt {
-            Ok(()) if ctx.stopped() => return Err(Stop::Paused),
-            Ok(()) if file_len(archive) == size => return Ok(()),
-            Ok(()) => {
-                if !backoff(ctx, &mut retries, "the connection closed early".into()).await {
-                    return Err(Stop::Failed(retry_exhausted()));
-                }
-            }
-            Err(why) => {
-                if !backoff(ctx, &mut retries, why).await {
-                    return Err(Stop::Failed(retry_exhausted()));
+        let plain = |text: &str, extra: &[u8]| !text.is_empty() && text.bytes().all(|b| b.is_ascii_alphanumeric() || extra.contains(&b));
+        if let Some(meta) = meta.filter(|m| m.dir.starts_with('/') && !m.dir.contains("..") && plain(&m.dir, b"/._-")) {
+            for server in meta.workable_servers {
+                // Only archive.org's own servers.
+                if server.ends_with(".archive.org") && plain(&server, b".-") {
+                    found.push(format!("https://{server}{}/{file}", meta.dir));
                 }
             }
         }
-        meter = Meter::new();
     }
+    if found.is_empty() {
+        found.push(url.to_string());
+    }
+    found
+}
+
+/// The archive's download, shared by the pieces downloading at once.
+struct Pull<'a> {
+    ctx: &'a Ctx,
+    client: &'a reqwest::Client,
+    servers: Vec<String>,
+    pieces: &'a Pieces,
+    /// Pieces not finished yet; a stopped one goes back to the front.
+    todo: Mutex<std::collections::VecDeque<u64>>,
+    done: AtomicU64,
+    meter: Mutex<Meter>,
+    last_emit: Mutex<Instant>,
+    /// The race's few seconds: until then, and the bar is left alone.
+    until: Option<Instant>,
+    failed: Mutex<Option<String>>,
+}
+
+impl Pull<'_> {
+    fn over(&self) -> bool {
+        self.ctx.stopped() || self.until.is_some_and(|t| Instant::now() >= t) || self.failed.lock().expect("pull").is_some()
+    }
+
+    fn tick(&self) {
+        {
+            let mut last = self.last_emit.lock().expect("last emit");
+            if last.elapsed() < EMIT_EVERY {
+                return;
+            }
+            *last = Instant::now();
+        }
+        let done = self.done.load(Ordering::SeqCst);
+        let speed = self.meter.lock().expect("meter").rate();
+        let probing = self.until.is_some();
+        self.ctx.set(|s| {
+            s.speed = speed;
+            if !probing {
+                s.done = done;
+                s.eta_secs = eta(self.pieces.size.saturating_sub(done), speed);
+                s.message.clear();
+            }
+        });
+        self.ctx.emit();
+    }
+
+    /// One connection: piece after piece, starting on server `first`; a
+    /// failure moves it to the next server.
+    async fn worker(&self, first: usize) {
+        let mut server = first % self.servers.len();
+        loop {
+            if self.over() {
+                return;
+            }
+            let Some(i) = self.todo.lock().expect("pull").pop_front() else { return };
+            let mut retries = 0u32;
+            loop {
+                match self.piece(&self.servers[server], i).await {
+                    Ok(true) => break,
+                    Ok(false) => {
+                        self.todo.lock().expect("pull").push_front(i);
+                        return;
+                    }
+                    Err(why) => {
+                        server = (server + 1) % self.servers.len();
+                        // The race's few seconds are not spent waiting.
+                        if self.until.is_some() || self.over() {
+                            self.todo.lock().expect("pull").push_front(i);
+                            return;
+                        }
+                        if !backoff(self.ctx, &mut retries, why).await {
+                            *self.failed.lock().expect("pull") = Some(retry_exhausted());
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The rest of piece `i` from `url`, appended to its file: true once it is
+    /// whole, false if stopped first.
+    async fn piece(&self, url: &str, i: u64) -> std::result::Result<bool, String> {
+        use futures_util::StreamExt;
+        use tokio::io::AsyncWriteExt;
+
+        let path = self.pieces.path(i);
+        let (start, len) = self.pieces.span(i);
+        let mut have = file_len(&path);
+        if have > len {
+            std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+            have = 0;
+        }
+        if have == len {
+            return Ok(true);
+        }
+        let from = start + have;
+        let resp = self
+            .client
+            .get(url)
+            .header(reqwest::header::RANGE, format!("bytes={from}-{}", start + len - 1))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            return Err(format!("the server answered {}", resp.status()));
+        }
+        // Exactly the bytes asked for, or none of them.
+        let range = resp.headers().get(reqwest::header::CONTENT_RANGE).and_then(|v| v.to_str().ok()).unwrap_or("");
+        if !range.starts_with(&format!("bytes {from}-")) {
+            return Err("the server sent another part of the file".into());
+        }
+        let mut file = tokio::fs::OpenOptions::new().create(true).append(true).open(&path).await.map_err(|e| e.to_string())?;
+        let mut stream = resp.bytes_stream();
+        let mut last_flush = Instant::now();
+        while !self.over() {
+            let next = tokio::time::timeout(STALL_TIMEOUT, stream.next()).await.map_err(|_| "the connection stalled".to_string())?;
+            let Some(chunk) = next else { break };
+            let chunk = chunk.map_err(|e| e.to_string())?;
+            if have + chunk.len() as u64 > len {
+                return Err("the server sent more than was asked".into());
+            }
+            file.write_all(&chunk).await.map_err(|e| format!("writing to disk failed: {e}"))?;
+            have += chunk.len() as u64;
+            self.done.fetch_add(chunk.len() as u64, Ordering::SeqCst);
+            self.meter.lock().expect("meter").add(chunk.len() as u64);
+            self.tick();
+            if last_flush.elapsed() > Duration::from_secs(5) {
+                file.flush().await.map_err(|e| e.to_string())?;
+                last_flush = Instant::now();
+            }
+        }
+        file.flush().await.map_err(|e| e.to_string())?;
+        if have == len || self.over() {
+            Ok(have == len)
+        } else {
+            Err("the connection closed early".into())
+        }
+    }
+}
+
+/// The backup archive into its pieces, ARCHIVE_PARALLEL at a time over
+/// `servers` (its addresses, see `mirrors`); each piece resumes where it
+/// stopped. With `probe`, only for that long (the race): the speed it
+/// reached, in bytes per second.
+async fn download_archive(
+    ctx: &Ctx,
+    client: &reqwest::Client,
+    servers: &[String],
+    pieces: &Pieces,
+    probe: Option<Duration>,
+) -> std::result::Result<f64, Stop> {
+    let servers = servers.to_vec();
+    std::fs::create_dir_all(&pieces.temp)?;
+    let have = pieces.have();
+    let todo: std::collections::VecDeque<u64> = (0..pieces.count()).filter(|&i| file_len(&pieces.path(i)) != pieces.span(i).1).collect();
+    if todo.is_empty() {
+        return Ok(f64::INFINITY);
+    }
+    ctx.set(|s| {
+        if probe.is_some() {
+            s.message = "Finding the fastest download server...".into();
+        } else {
+            s.phase = Phase::Downloading;
+            s.done = have;
+            s.total = pieces.size;
+            s.message = if have > 0 { "Resuming...".into() } else { "Downloading...".into() };
+        }
+    });
+    ctx.emit();
+    let pull = Pull {
+        ctx,
+        client,
+        servers,
+        pieces,
+        todo: Mutex::new(todo),
+        done: AtomicU64::new(have),
+        meter: Mutex::new(Meter::new()),
+        last_emit: Mutex::new(Instant::now()),
+        until: probe.map(|d| Instant::now() + d),
+        failed: Mutex::new(None),
+    };
+    futures_util::future::join_all((0..ARCHIVE_PARALLEL).map(|w| pull.worker(w))).await;
+    let speed = pull.meter.lock().expect("meter").rate();
+    if probe.is_some() {
+        ctx.set(|s| s.speed = 0.0);
+        return if ctx.stopped() { Err(Stop::Paused) } else { Ok(speed) };
+    }
+    if let Some(why) = pull.failed.lock().expect("pull").take() {
+        return Err(Stop::Failed(why));
+    }
+    if ctx.stopped() {
+        return Err(Stop::Paused);
+    }
+    if pieces.have() != pieces.size {
+        return Err(Stop::Failed("The download stopped before the end. Press Continue -- your progress is kept.".into()));
+    }
+    Ok(speed)
 }
 
 /// 7-Zip's standalone extractor, compiled into the launcher (build.rs,
@@ -1507,7 +1831,8 @@ fn command(exe: &Path) -> std::process::Command {
 /// Only `jobs`' files out of the archive, into `out` (under `folder`, as in
 /// the archive). The list of names goes through a file: hundreds of paths do
 /// not fit on a command line.
-async fn unpack(ctx: &Ctx, archive: &Path, folder: &str, jobs: &[GameFile], out: &Path) -> std::result::Result<(), Stop> {
+async fn unpack(ctx: &Ctx, pieces: &Pieces, folder: &str, jobs: &[GameFile], out: &Path) -> std::result::Result<(), Stop> {
+    let archive = pieces.first();
     let exe = seven_zip(&ctx.config_dir).ok_or_else(|| {
         Stop::Failed("The game's files could not be prepared: 7-Zip is missing. Install 7-Zip from 7-zip.org and press Continue -- your progress is kept.".into())
     })?;
@@ -1531,7 +1856,7 @@ async fn unpack(ctx: &Ctx, archive: &Path, folder: &str, jobs: &[GameFile], out:
     let stop = ctx.stop.clone();
     let tell = ctx.tell.clone();
     let dir = ctx.dir.clone();
-    let (archive, out_dir, list_file) = (archive.to_path_buf(), out.to_path_buf(), list.clone());
+    let (out_dir, list_file) = (out.to_path_buf(), list.clone());
     let result = tokio::task::spawn_blocking(move || -> std::result::Result<bool, String> {
         use std::io::Read as _;
         // -bsp1: progress to stdout; -bso0: no file list; -aoa: overwrite, so
@@ -1600,15 +1925,10 @@ async fn unpack(ctx: &Ctx, archive: &Path, folder: &str, jobs: &[GameFile], out:
         Ok(false) => Err(Stop::Paused),
         Err(why) => {
             // A damaged archive is downloaded again next time.
-            let _ = std::fs::remove_file(archive_of(out));
+            pieces.remove();
             Err(Stop::Failed(format!("The game's files could not be prepared ({why}). Press Continue to try again.")))
         }
     }
-}
-
-/// The archive next to an unpack folder (both in the temp folder).
-fn archive_of(out: &Path) -> PathBuf {
-    out.with_file_name(ARCHIVE_PART)
 }
 
 /// Where the game already is in `dir` (or a few folders below it), for the
@@ -1659,8 +1979,8 @@ fn file_len(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
-/// The bytes of the downloads waiting in `temp` (`<sha256>.part` files), or
-/// None when there are none.
+/// The bytes of the downloads waiting in `temp` (`<sha256>.part` files and
+/// the backup archive's pieces), or None when there are none.
 fn parts_on_disk(temp: &Path) -> Option<u64> {
     let mut found = None;
     for entry in std::fs::read_dir(temp).ok()?.flatten() {
@@ -1668,7 +1988,7 @@ fn parts_on_disk(temp: &Path) -> Option<u64> {
         let is_part = name
             .strip_suffix(".part")
             .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()));
-        if is_part {
+        if is_part || is_piece(&name) {
             *found.get_or_insert(0) += entry.metadata().map(|m| m.len()).unwrap_or(0);
         }
     }
@@ -1803,6 +2123,19 @@ mod tests {
         GameFile { path: path.into(), size: body.len() as u64, sha256: sha(body) }
     }
 
+    /// Bytes that do not compress (xorshift), like the game's packed files.
+    fn noise(len: usize) -> Vec<u8> {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 32) as u8
+            })
+            .collect()
+    }
+
     fn list(files: Vec<GameFile>) -> GameList {
         GameList { files, backup: None }
     }
@@ -1934,13 +2267,14 @@ mod tests {
 
     /// The storage's whole run, as `run` does it: the parts, then into place.
     async fn fetch_all(ctx: &Ctx, client: &reqwest::Client, source: &Source, root: &Path, temp: &Path, jobs: &[GameFile], have: u64) -> std::result::Result<(), Stop> {
-        fetch_parts(ctx, client, source, temp, jobs, have, false).await?;
+        fetch_parts(ctx, client, source, temp, jobs, have, false, None).await?;
         place_all(ctx, root, temp, jobs)
     }
 
     /// A server for the backup tests: each path its body, with or without
     /// `Range` (archive.org answers a file inside an archive whole, and the
-    /// archive itself in ranges); any other path answers `status`.
+    /// archive itself in ranges, `bytes=a-` or `bytes=a-b`); any other path
+    /// answers `status`.
     async fn serve_paths(routes: Vec<(String, Vec<u8>, bool)>, status: u16) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1959,19 +2293,22 @@ mod tests {
                         let _ = sock.write_all(head.as_bytes()).await;
                         return;
                     };
-                    let from: usize = req
+                    let range: Option<(usize, usize)> = req
                         .lines()
-                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=").map(|r| r.trim_end_matches('-').to_string()))
-                        .and_then(|r| r.parse().ok())
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=").map(str::to_string))
                         .filter(|_| *ranges)
-                        .unwrap_or(0);
-                    let head = if *ranges && from > 0 {
-                        format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {from}-{}/{}\r\nConnection: close\r\n\r\n", body.len() - from, body.len() - 1, body.len())
+                        .and_then(|r| {
+                            let (a, b) = r.trim().split_once('-')?;
+                            Some((a.parse().ok()?, b.parse().unwrap_or(body.len() - 1).min(body.len() - 1)))
+                        });
+                    let (from, to) = range.unwrap_or((0, body.len() - 1));
+                    let head = if range.is_some() {
+                        format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {from}-{to}/{}\r\nConnection: close\r\n\r\n", to + 1 - from, body.len())
                     } else {
                         format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
                     };
                     let _ = sock.write_all(head.as_bytes()).await;
-                    let _ = sock.write_all(&body[from..]).await;
+                    let _ = sock.write_all(&body[from..=to]).await;
                 });
             }
         });
@@ -1986,8 +2323,126 @@ mod tests {
         let client = http_client().unwrap();
         let jobs = vec![entry("BravoHotelGame/a.pak", b"aaaa"), entry("BravoHotelGame/b.pak", b"bbbb")];
         let source = Source::Base(format!("{base}/game/"));
-        let result = fetch_parts(&ctx, &client, &source, &tmp.path().join(TEMP_DIR), &jobs, 0, true).await;
+        let result = fetch_parts(&ctx, &client, &source, &tmp.path().join(TEMP_DIR), &jobs, 0, true, None).await;
         assert!(matches!(result, Err(Stop::Backup)));
+    }
+
+    /// Serves `body` at any path with `Range`, `per_ms` bytes a millisecond:
+    /// a slow storage.
+    async fn serve_slowly(body: Vec<u8>, per_ms: usize) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let from: usize = req
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=").map(|r| r.trim_end_matches('-').to_string()))
+                        .and_then(|r| r.parse().ok())
+                        .unwrap_or(0);
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {from}-{}/{}\r\nConnection: close\r\n\r\n",
+                        body.len() - from,
+                        body.len() - 1,
+                        body.len()
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    for chunk in body[from..].chunks(per_ms) {
+                        if sock.write_all(chunk).await.is_err() {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                });
+            }
+        });
+        format!("http://{addr}/game/")
+    }
+
+    fn race(backup_secs: f64) -> Race {
+        Race { backup_secs, backup_speed: 1e9, storage_speed: Mutex::new(None) }
+    }
+
+    #[tokio::test]
+    async fn the_race_hands_over_to_a_faster_backup() {
+        let body: Vec<u8> = (0..2_000_000u32).map(|i| (i % 241) as u8).collect();
+        let base = serve_slowly(body.clone(), 2_000).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let client = http_client().unwrap();
+        let jobs = vec![entry("BravoHotelGame/big.pak", &body)];
+        let temp = tmp.path().join(TEMP_DIR);
+        let fast = race(0.0);
+        let result = fetch_parts(&ctx, &client, &Source::Base(base.clone()), &temp, &jobs, 0, true, Some(&fast)).await;
+        assert!(matches!(result, Err(Stop::Faster)), "the backup would finish at once");
+        assert!(fast.storage_speed.lock().unwrap().is_some_and(|s| s > 0.0), "the storage's speed was measured");
+        assert!(file_len(&part_path(&temp, &jobs[0])) > 0, "what the storage sent is kept");
+
+        // A backup slower than the storage: the storage finishes.
+        let slow = race(1e9);
+        let result = fetch_parts(&ctx, &client, &Source::Base(base), &temp, &jobs, 0, true, Some(&slow)).await;
+        assert!(result.is_ok());
+        assert!(slow.storage_speed.lock().unwrap().is_some());
+    }
+
+    /// The real backup on archive.org, for a few seconds: both servers found,
+    /// the speed it reaches here. `cargo test -- --ignored real_backup`.
+    #[tokio::test]
+    #[ignore = "downloads from archive.org"]
+    async fn real_backup_servers_and_speed() {
+        let url = "https://archive.org/download/SPShippingDev/Manifest%20%232065353802481281242.7z";
+        let client = http_client().unwrap();
+        let servers = mirrors(&client, url).await;
+        println!("servers: {servers:?}");
+        assert!(servers.len() >= 2 && servers.iter().all(|s| s.contains(".us.archive.org/")), "{servers:?}");
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let pieces = Pieces::new(tmp.path(), 29_710_037_796);
+        let speed = download_archive(&ctx, &client, &servers, &pieces, Some(Duration::from_secs(8))).await.ok().unwrap();
+        println!("{:.1} MB/s, {} MB kept in {} pieces", speed / 1e6, pieces.have() / 1_000_000, (0..pieces.count()).filter(|&i| pieces.path(i).exists()).count());
+        assert!(speed > 0.0);
+        let first = std::fs::read(pieces.first()).unwrap();
+        assert!(first.starts_with(b"7z\xbc\xaf\x27\x1c"), "the first piece is the archive's start");
+    }
+
+    #[test]
+    fn pieces_are_named_and_cut_for_seven_zip() {
+        let temp = Path::new("t");
+        let pieces = Pieces::new(temp, 3 * PIECE + 10);
+        assert_eq!(pieces.count(), 4);
+        assert_eq!(pieces.span(3), (3 * PIECE, 10));
+        assert_eq!(pieces.path(0), temp.join(format!("backup-{}.7z.001", 3 * PIECE + 10)));
+        // A huge archive still fits in three-digit names.
+        assert!(Pieces::new(temp, 2000 * PIECE).count() <= 999);
+        assert!(is_piece("backup-29710037796.7z.042"));
+        assert!(!is_piece("backup-.7z.001") && !is_piece("backup-12.7z.1") && !is_piece("game.7z.part"));
+    }
+
+    #[tokio::test]
+    async fn the_archive_comes_in_pieces_from_the_servers_that_work() {
+        let archive = noise(5 * PIECE as usize + 777);
+        let good = serve_paths(vec![("/item/game.7z".into(), archive.clone(), true)], 404).await;
+        let broken = serve_paths(vec![], 503).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let temp = tmp.path().join(TEMP_DIR);
+        std::fs::create_dir_all(&temp).unwrap();
+        let pieces = Pieces::new(&temp, archive.len() as u64);
+        // An earlier run: the first piece whole, half of the third.
+        std::fs::write(pieces.path(0), &archive[..PIECE as usize]).unwrap();
+        std::fs::write(pieces.path(2), &archive[2 * PIECE as usize..2 * PIECE as usize + 1000]).unwrap();
+        let servers = vec![format!("{broken}/item/game.7z"), format!("{good}/item/game.7z")];
+        let client = http_client().unwrap();
+        let result = download_archive(&ctx, &client, &servers, &pieces, None).await;
+        assert!(result.is_ok(), "{:?}", result.err().map(|e| match e { Stop::Failed(m) => m, _ => "stopped".into() }));
+        let joined: Vec<u8> = (0..pieces.count()).flat_map(|i| std::fs::read(pieces.path(i)).unwrap()).collect();
+        assert!(joined == archive, "the pieces put together are the archive");
     }
 
     #[tokio::test]
@@ -2031,7 +2486,11 @@ mod tests {
         let stage = tmp.path().join("stage");
         let bodies = vec![
             (crate::game::GAME_EXE.to_string(), b"MZ the exe".to_vec()),
-            ("BravoHotelGame/Content/Paks/pakchunk0-WindowsClient.pak".to_string(), (0..200_000u32).map(|i| (i % 251) as u8).collect::<Vec<u8>>()),
+            // Noise, so the archive is several pieces long.
+            (
+                "BravoHotelGame/Content/Paks/pakchunk0-WindowsClient.pak".to_string(),
+                noise(300_000),
+            ),
             ("Engine/Binaries/x.dll".to_string(), b"dll".to_vec()),
         ];
         for (path, body) in &bodies {
@@ -2052,8 +2511,12 @@ mod tests {
         // One file came whole from the storage already: only the others are unpacked.
         std::fs::create_dir_all(&temp).unwrap();
         std::fs::write(part_path(&temp, &files[2]), &bodies[2].1).unwrap();
-        // Half of the archive was downloaded by an earlier run.
-        std::fs::write(temp.join(ARCHIVE_PART), &archive_bytes[..archive_bytes.len() / 2]).unwrap();
+        // An earlier run: the first piece, and the previous launcher's
+        // one-file archive (which goes).
+        let pieces = Pieces::new(&temp, archive_bytes.len() as u64);
+        assert!(pieces.count() >= 3, "{} pieces", pieces.count());
+        std::fs::write(pieces.path(0), &archive_bytes[..PIECE as usize]).unwrap();
+        std::fs::write(temp.join(WHOLE_ARCHIVE), &archive_bytes[..100]).unwrap();
         let backup = Backup { url: format!("{base}/item/game.7z"), folder: format!("{folder}/"), size: archive_bytes.len() as u64, only: false };
         let client = http_client().unwrap();
         let result = from_backup(&ctx, &client, &backup, &temp, &files, 0).await;
@@ -2063,7 +2526,8 @@ mod tests {
         for (path, body) in &bodies {
             assert_eq!(&std::fs::read(root.join(path)).unwrap(), body, "{path}");
         }
-        assert!(!temp.join(ARCHIVE_PART).exists(), "the archive is deleted once unpacked");
+        assert!(!pieces.first().exists(), "the archive is deleted once unpacked");
+        assert!(!temp.join(WHOLE_ARCHIVE).exists(), "the old one-file archive is gone");
         assert!(!root.join("BravoHotelGame/Binaries/Win64/BattlEye").exists(), "only the list's files are unpacked");
     }
 
@@ -2102,6 +2566,7 @@ mod tests {
             Stop::Failed(m) => m,
             Stop::Paused => "paused".into(),
             Stop::Backup => "backup".into(),
+            Stop::Faster => "faster".into(),
         }));
         for (path, body) in &bodies {
             assert_eq!(&std::fs::read(tmp.path().join(path)).unwrap(), body, "{path}");
