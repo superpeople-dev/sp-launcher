@@ -30,7 +30,6 @@ pub struct Deployment {
     record_path: PathBuf,
     record: Record,
     _lock: File,
-    enabled: bool,
     cleanup_on_drop: bool,
 }
 impl Deployment {
@@ -56,7 +55,7 @@ impl Deployment {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Record::default(),
             Err(e) => return Err(e.into()),
         };
-        let mut session = Self { root, record_path, record, _lock: lock, enabled, cleanup_on_drop: false };
+        let mut session = Self { root, record_path, record, _lock: lock, cleanup_on_drop: false };
         if let Some(pid) = session.record.pid {
             if process_alive(pid)? { return Err(message("The previous game session is still running. Close it before changing Client fixes.")); }
         }
@@ -130,7 +129,6 @@ impl Deployment {
         fs::rename(temp, &self.record_path)?;
         Ok(())
     }
-    pub fn dll_path(&self) -> Option<PathBuf> { self.enabled.then(|| self.root.join(DLL_PATH)) }
     pub fn mark_running(&mut self, pid: u32) -> Result<()> { self.record.pid = Some(pid); self.save() }
     pub fn cleanup(&mut self) -> Result<()> {
         if let Some(pid) = self.record.pid {
@@ -247,8 +245,7 @@ mod tests {
         let game=tempfile::tempdir().unwrap(); let state=tempfile::tempdir().unwrap(); folders(game.path());
         let mut orphan=Deployment::prepare(game.path(),state.path(),true,PAYLOADS).unwrap();
         orphan.cleanup_on_drop=false; drop(orphan);
-        let session=Deployment::prepare(game.path(),state.path(),false,PAYLOADS).unwrap();
-        assert!(session.dll_path().is_none());
+        let _session=Deployment::prepare(game.path(),state.path(),false,PAYLOADS).unwrap();
         for p in PATHS { assert!(!game.path().join(p).exists()); }
     }
     #[test]
