@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { day } from "../../lib/community";
+import { dayAndYear } from "../../lib/community";
 import type { Profile } from "../../types";
 import { ItemDetail } from "./ItemDetail";
 import { useBoard } from "./useBoard";
@@ -34,30 +34,31 @@ export function CompletedPanel({ me, onError, onNotice }: Props) {
       <ol className="timeline" aria-busy={items === null}>
         {items === null
           ? Array.from({ length: PAGE }, (_, i) => <li key={i} className="entry entry--ghost" />)
-          : done.slice(0, shown).map((item) => (
-              <li key={item.id}>
-                <button type="button" className="entry" onClick={() => setOpen(item.id)}>
-                  <span className="entry__date">{day(item.completedAt ?? item.createdAt)}</span>
-                  <span className="entry__mark" aria-hidden>
-                    <svg viewBox="0 0 16 16">
-                      <path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" strokeWidth="2" />
-                    </svg>
-                  </span>
-                  <span className="entry__main">
-                    <span className="entry__title">{item.title}</span>
-                    {item.description && <span className="entry__desc">{item.description}</span>}
-                    <span className="entry__meta">
-                      {item.tags.map((t) => (
-                        <span key={t.name} className="tag" style={{ color: t.color, borderColor: `${t.color}66` }}>
-                          {t.name}
-                        </span>
-                      ))}
-                      <span className="entry__score">▲ {item.score}</span>
+          : done.slice(0, shown).map((item) => {
+              const when = dayAndYear(item.completedAt ?? item.createdAt);
+              return (
+                <li key={item.id}>
+                  <button type="button" className="entry" onClick={() => setOpen(item.id)}>
+                    <span className="entry__date">
+                      {when.day}
+                      {when.year && <span className="entry__year">{when.year}</span>}
                     </span>
-                  </span>
-                </button>
-              </li>
-            ))}
+                    <span className="entry__main">
+                      <span className="entry__title">{item.title}</span>
+                      {item.description && <span className="entry__desc">{item.description}</span>}
+                      <span className="entry__meta">
+                        {item.tags.map((t) => (
+                          <span key={t.name} className="tag" style={{ color: t.color, borderColor: `${t.color}66` }}>
+                            {t.name}
+                          </span>
+                        ))}
+                        <span className="entry__score">▲ {item.score}</span>
+                      </span>
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
       </ol>
 
       {items !== null && done.length > shown && (

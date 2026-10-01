@@ -184,3 +184,13 @@ export function day(ms: number): string {
   const thisYear = date.getFullYear() === new Date().getFullYear();
   return date.toLocaleDateString("en-US", { day: "numeric", month: "short", year: thisYear ? undefined : "numeric" });
 }
+
+/** "Sep 29" and, when it is not this year, the year on its own (Completed shows it under the day). */
+export function dayAndYear(ms: number): { day: string; year: string | null } {
+  const date = new Date(ms);
+  const year = date.getFullYear();
+  return {
+    day: date.toLocaleDateString("en-US", { day: "numeric", month: "short" }),
+    year: year === new Date().getFullYear() ? null : String(year),
+  };
+}
