@@ -9,6 +9,7 @@ mod download;
 mod engine_ini;
 mod error;
 mod game;
+mod hardware;
 mod shim;
 mod gateway;
 pub mod hosts;
@@ -399,7 +400,11 @@ fn discord_cancel(app: AppHandle, state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-fn sign_out(state: State<'_, AppState>) -> Result<()> {
+async fn sign_out(state: State<'_, AppState>) -> Result<()> {
+    // #discord-auth-logs hears it first, while the session still works.
+    if let Ok(Some(session)) = session_of(&state) {
+        auth::signed_out(&session).await;
+    }
     forget_sign_in(&state)
 }
 
@@ -530,8 +535,8 @@ async fn launch_game(
     // backend checks it, finds the account, and answers with the ticket (and
     // remembers this launch for the game's own login). See auth.rs.
     let mut env: Vec<(String, String)> = Vec::new();
+    let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
     {
-        let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
         let device_id = ensure_device_id(&state)?;
         let pass = auth::game_pass(&session).await.map_err(|e| expired(&app, &state, e))?;
         let ticket = auth::discord_launch(&pass, &device_id).await?;
@@ -622,6 +627,12 @@ async fn launch_game(
     }
     *state.running_pid.lock().expect("pid mutex") = Some(pid);
     state.discord.set(discord::State::InGame);
+
+    // #launcher-logs: who started the game, on what PC (hardware.rs).
+    tauri::async_runtime::spawn(async move {
+        let pc = tauri::async_runtime::spawn_blocking(hardware::summary).await.unwrap_or_default();
+        auth::report(session, serde_json::json!({ "action": "game.launched", "hardware": pc }));
+    });
 
     // The launcher used to hide itself here and only reappear when the game
     // exited. Now it stays open — the Play tab swaps its button for "Close
@@ -792,7 +803,12 @@ async fn uninstall_game(app: AppHandle) -> Result<()> {
             return Err(LauncherError::Message("Close the game before uninstalling it.".into()));
         }
         let dir = state.config.lock().expect("config mutex").install_dir.clone();
-        download::uninstall(&app, &state.download, &dir)
+        let freed = download::uninstall(&app, &state.download, &dir)?;
+        // #launcher-logs, through the website.
+        if let Ok(Some(session)) = session_of(&state) {
+            auth::report(session, serde_json::json!({ "action": "uninstalled", "files": freed.files, "bytes": freed.bytes }));
+        }
+        Ok(())
     })
     .await
     .map_err(|e| LauncherError::Message(e.to_string()))?
