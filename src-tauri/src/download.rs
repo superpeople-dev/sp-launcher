@@ -80,6 +80,11 @@
 //! clearly sooner, unpacking included. If the chosen backup then fails, the
 //! storage carries on: files already checked are never fetched twice.
 //!
+//! The team's #launcher-logs hears of a new download once it is known where
+//! the files come from: at once without a race, else when it is judged, with
+//! both speeds ("download.started" and its `source`). The other source taking
+//! over later is "download.switched".
+//!
 //! While a download runs, Windows is asked not to go to sleep
 //! (`SetThreadExecutionState`); the display may still turn off.
 
@@ -388,6 +393,7 @@ pub fn start(app: &AppHandle, dl: &Downloader, dir: String, verify: bool, sessio
         stop: dl.stop.clone(),
         config_dir: dl.config_dir.clone(),
         dir: dir_path,
+        start: Mutex::default(),
     };
     let running = dl.running.clone();
     tauri::async_runtime::spawn(async move {
@@ -646,9 +652,40 @@ struct Ctx {
     stop: Arc<AtomicBool>,
     config_dir: PathBuf,
     dir: PathBuf,
+    /// A new download's start, told once it is known where the files come
+    /// from (`came_from`).
+    start: Mutex<Start>,
+}
+
+/// "download.started" waits for the race (see the top): told before it, it
+/// could not say whether the storage or the backup sends the game.
+#[derive(Default)]
+struct Start {
+    /// A new download (not a verify or a resume): files and bytes to fetch.
+    due: Option<(usize, u64)>,
+    /// Where the files come from, once told.
+    from: Option<&'static str>,
 }
 
 impl Ctx {
+    /// For #launcher-logs: where a new download's files come from ("storage"
+    /// or "backup"). "download.started" the first time, with the race's
+    /// speeds when there was one; "download.switched" and why when the other
+    /// source takes over later. Nothing for a verify or a resume.
+    fn came_from(&self, from: &'static str, speeds: Option<serde_json::Value>, why: &str) {
+        let mut start = self.start.lock().expect("download start");
+        let Some((files, bytes)) = start.due else { return };
+        if start.from == Some(from) {
+            return;
+        }
+        let report = match start.from {
+            None => serde_json::json!({ "action": "download.started", "files": files, "bytes": bytes, "source": from, "speeds": speeds }),
+            Some(_) => serde_json::json!({ "action": "download.switched", "source": from, "reason": why }),
+        };
+        start.from = Some(from);
+        drop(start);
+        (self.tell)(Event::Report(report));
+    }
     fn set(&self, f: impl FnOnce(&mut Status)) {
         let mut st = self.status.lock().expect("download status");
         f(&mut st);
@@ -741,16 +778,22 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
 
     // ---- downloading ---------------------------------------------------
     if !verify && have == 0 {
-        (ctx.tell)(Event::Report(serde_json::json!({ "action": "download.started", "files": jobs.len(), "bytes": total })));
+        ctx.start.lock().expect("download start").due = Some((jobs.len(), total));
     }
     let started = Instant::now();
     let backup = list.backup.as_ref();
+    let only_backup = backup.is_some_and(|b| b.only);
     // The race's first half: the backup's few seconds (see the top).
     let race = match backup {
         Some(b) if !b.only => backup_time(ctx, &client, b, &temp, total - have).await?,
         _ => None,
     };
-    let storage = if backup.is_some_and(|b| b.only) {
+    // Without a race the source is known now; with one, once it is judged
+    // (Progress::judge).
+    if race.is_none() {
+        ctx.came_from(if only_backup { "backup" } else { "storage" }, None, "");
+    }
+    let storage = if only_backup {
         Err(Stop::Backup)
     } else {
         fetch_parts(ctx, &client, source, &temp, &jobs, have, backup.is_some(), race.as_ref()).await
@@ -765,6 +808,7 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
                 // The backup failed after all: the storage, which was
                 // working, carries on with what is still missing.
                 Err(Stop::Failed(_)) => {
+                    ctx.came_from("storage", None, "The backup failed: the storage carries on.");
                     let have = jobs.iter().map(|j| file_len(&part_path(&temp, j)).min(j.size)).sum();
                     fetch_parts(ctx, &client, source, &temp, &jobs, have, false, None).await?;
                     "storage"
@@ -774,22 +818,21 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
         }
         Err(Stop::Backup) => {
             let backup = backup.ok_or_else(unavailable)?;
+            ctx.came_from("backup", None, "The storage could not send the files.");
             from_backup(ctx, &client, backup, &temp, &jobs, BACKUP_SINGLE_FILES).await?;
             "backup"
         }
         Err(stop) => return Err(stop),
     };
+    // The storage sent it all before the race was judged.
+    ctx.came_from(from, race.as_ref().and_then(Race::speeds), "");
     place_all(ctx, &root, &temp, &jobs)?;
     // Each was hashed as it arrived and placed only if it matched the list.
     let placed = jobs.iter().filter_map(|j| integrity::checked(&root, &j.path, &j.sha256));
     if let Err(e) = integrity::remember(&ctx.config_dir, &root, placed) {
         eprintln!("[integrity] {e}");
     }
-    // Both speeds of the race (bytes per second), when there was one.
-    let speeds = race.as_ref().and_then(|r| {
-        let storage = (*r.storage_speed.lock().expect("race"))?;
-        Some(serde_json::json!({ "storage": storage.round(), "backup": r.backup_speed.min(1e12).round() }))
-    });
+    let speeds = race.as_ref().and_then(Race::speeds);
     (ctx.tell)(Event::Report(if verify {
         serde_json::json!({ "action": "verify.repaired", "files": jobs.len(), "bytes": total, "source": from, "speeds": speeds, "moved": moved.len() })
     } else {
@@ -1162,6 +1205,14 @@ struct Race {
     storage_speed: Mutex<Option<f64>>,
 }
 
+impl Race {
+    /// Both speeds (bytes per second), once the storage's is measured.
+    fn speeds(&self) -> Option<serde_json::Value> {
+        let storage = (*self.storage_speed.lock().expect("race"))?;
+        Some(serde_json::json!({ "storage": storage.round(), "backup": self.backup_speed.min(1e12).round() }))
+    }
+}
+
 /// The download's progress, shared by the files downloading at once.
 struct Progress<'a> {
     done: AtomicU64,
@@ -1184,8 +1235,8 @@ struct Progress<'a> {
 impl Progress<'_> {
     /// The race's second half: once the storage has sent for PROBE_STORAGE,
     /// the backup takes over if it would finish in under RACE_MARGIN of the
-    /// storage's time. Judged once.
-    fn judge(&self, done: u64, speed: f64) {
+    /// storage's time. Judged once, and told (`Ctx::came_from`).
+    fn judge(&self, ctx: &Ctx, done: u64, speed: f64) {
         let Some(race) = self.race else { return };
         let mut since = self.race_since.lock().expect("race");
         let started = *since.get_or_insert_with(Instant::now);
@@ -1194,11 +1245,14 @@ impl Progress<'_> {
             return;
         }
         *measured = Some(speed);
+        drop(measured);
         let storage_secs = self.total.saturating_sub(done) as f64 / speed;
-        if race.backup_secs < storage_secs * RACE_MARGIN {
+        let faster = race.backup_secs < storage_secs * RACE_MARGIN;
+        if faster {
             self.faster.store(true, Ordering::SeqCst);
             self.to_backup.store(true, Ordering::SeqCst);
         }
+        ctx.came_from(if faster { "backup" } else { "storage" }, race.speeds(), "");
     }
 
     /// A file's bytes on disk are now `now` (it was `counted`).
@@ -1229,7 +1283,7 @@ impl Progress<'_> {
             s.eta_secs = eta(self.total.saturating_sub(done), speed);
         });
         ctx.emit();
-        self.judge(done, speed);
+        self.judge(ctx, done, speed);
     }
 
     fn turning_to_backup(&self) -> bool {
@@ -2554,6 +2608,63 @@ mod tests {
         assert!(slow.storage_speed.lock().unwrap().is_some());
     }
 
+    /// A ctx that keeps its #launcher-logs reports.
+    fn reporting_ctx(dir: &Path) -> (Ctx, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let kept = reports.clone();
+        let ctx = Ctx {
+            tell: Arc::new(move |event| {
+                if let Event::Report(report) = event {
+                    kept.lock().unwrap().push(report);
+                }
+            }),
+            ..test_ctx(dir)
+        };
+        (ctx, reports)
+    }
+
+    #[tokio::test]
+    async fn the_start_is_told_once_the_race_picks_a_source() {
+        let body: Vec<u8> = (0..2_000_000u32).map(|i| (i % 241) as u8).collect();
+        let base = serve_slowly(body.clone(), 2_000).await;
+        let client = http_client().unwrap();
+        let jobs = vec![entry("BravoHotelGame/big.pak", &body)];
+        for (backup_secs, winner) in [(0.0, "backup"), (1e9, "storage")] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (ctx, reports) = reporting_ctx(tmp.path());
+            ctx.start.lock().unwrap().due = Some((1, body.len() as u64));
+            let judged = race(backup_secs);
+            let _ = fetch_parts(&ctx, &client, &Source::Base(base.clone()), &tmp.path().join(TEMP_DIR), &jobs, 0, true, Some(&judged)).await;
+            let reports = reports.lock().unwrap();
+            assert_eq!(reports.len(), 1, "told once: {reports:?}");
+            assert_eq!(reports[0]["action"], "download.started");
+            assert_eq!(reports[0]["source"], winner);
+            assert!(reports[0]["speeds"]["storage"].as_f64().is_some_and(|s| s > 0.0), "with both speeds");
+        }
+    }
+
+    #[test]
+    fn a_new_download_tells_its_source_then_each_switch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, reports) = reporting_ctx(tmp.path());
+        // A verify or a resume: nothing.
+        ctx.came_from("storage", None, "");
+        assert!(reports.lock().unwrap().is_empty());
+
+        ctx.start.lock().unwrap().due = Some((450, 31_000_000_000));
+        ctx.came_from("storage", None, "");
+        ctx.came_from("storage", None, "");
+        ctx.came_from("backup", None, "The storage could not send the files.");
+        let reports = reports.lock().unwrap();
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0]["action"], "download.started");
+        assert_eq!(reports[0]["source"], "storage");
+        assert_eq!(reports[0]["files"], 450);
+        assert_eq!(reports[1]["action"], "download.switched");
+        assert_eq!(reports[1]["source"], "backup");
+        assert_eq!(reports[1]["reason"], "The storage could not send the files.");
+    }
+
     /// The real backup on archive.org, for a few seconds: both servers found,
     /// the speed it reaches here. `cargo test -- --ignored real_backup`.
     #[tokio::test]
@@ -2766,6 +2877,7 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             config_dir: dir.join("config"),
             dir: dir.to_path_buf(),
+            start: Mutex::default(),
         }
     }
 
