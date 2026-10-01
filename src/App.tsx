@@ -24,6 +24,27 @@ import type { AuthState, Config, HostsStatus, InstallState, NewsItem, Phase, Pro
 // user having to reopen the launcher.
 const NEWS_REFRESH_MS = 10 * 60 * 1000;
 
+// The website's last answer about the terms, per Discord account, kept on this
+// PC. After a restart (an update) Play shows it at once, rather than a locked
+// button for the second the website takes to answer. The answer then replaces
+// it, and Play itself is checked by the website (launch_game) whatever this says.
+const termsKey = (id: string) => `sp.terms.accepted.${id}`;
+function acceptedBefore(id: string): boolean {
+  try {
+    return localStorage.getItem(termsKey(id)) === "1";
+  } catch {
+    return false;
+  }
+}
+function rememberAccepted(id: string, accepted: boolean) {
+  try {
+    if (accepted) localStorage.setItem(termsKey(id), "1");
+    else localStorage.removeItem(termsKey(id));
+  } catch {
+    // Without storage the button just waits for the website, as before.
+  }
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>("play");
   const [config, setConfig] = useState<Config | null>(null);
@@ -42,7 +63,8 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
 
   // The Terms of Service, which Play needs accepted (TermsDialog). `null` until
-  // the website has answered: Play stays locked until it says they are.
+  // the website has answered; meanwhile Play shows what it said last time on
+  // this PC (acceptedBefore), locked if it never said yes.
   const [terms, setTerms] = useState<Terms | null>(null);
   const [termsOpen, setTermsOpen] = useState(false);
   const [termsNote, setTermsNote] = useState<string | null>(null);
@@ -150,6 +172,12 @@ export default function App() {
       setTermsOpen(false);
     }
   }, [profileId, loadTerms]);
+
+  // Each answer (at start, on focus, after accepting) is the one shown next time.
+  useEffect(() => {
+    if (profileId && terms) rememberAccepted(profileId, terms.accepted);
+  }, [profileId, terms]);
+  const termsAccepted = terms ? terms.accepted : !!profileId && acceptedBefore(profileId);
 
   // Coming back to the launcher asks again (at most once a minute): terms that
   // changed meanwhile lock Play until they are read.
@@ -418,7 +446,7 @@ export default function App() {
             phase={phase}
             launchArgs={config.launch_args}
             busy={busy}
-            locked={!terms?.accepted}
+            locked={!termsAccepted}
             onUnlock={() => (terms ? setTermsOpen(true) : loadTerms(true))}
             onLaunchArgs={(launch_args) => patchConfig({ launch_args })}
             onPrimary={onPrimary}
