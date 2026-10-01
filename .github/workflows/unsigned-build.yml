@@ -135,6 +135,20 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
+      # 7-Zip's standalone extractor for the Download tab's backup (download.rs),
+      # from 7-Zip's own GitHub release, checked against the digest GitHub lists.
+      - name: Bundle 7zr.exe
+        shell: pwsh
+        env:
+          SEVENZR_URL: https://github.com/ip7z/7zip/releases/download/26.03/7zr.exe
+          SEVENZR_SHA256: ad4c82fadcbdf93c03b4fc440f300509c7d60c5c2f4d183e35d9d70d6957037d
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP '7zr.exe'
+          Invoke-WebRequest $env:SEVENZR_URL -OutFile $exe
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:SEVENZR_SHA256) { throw "7zr.exe does not match its checksum: $hash" }
+          Copy-Item -LiteralPath $exe -Destination src-tauri/resources/7zr.exe
+
       - name: Build Tauri executable without bundling
         run: bun run tauri build --no-bundle
 

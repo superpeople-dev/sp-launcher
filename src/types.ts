@@ -141,7 +141,7 @@ export interface Choice {
 
 /** Mirrors `download::Status` in src-tauri/src/download.rs — keep the two in step. */
 export interface DownloadStatus {
-  phase: "idle" | "checking" | "downloading" | "paused" | "done" | "failed";
+  phase: "idle" | "checking" | "downloading" | "preparing" | "paused" | "done" | "failed";
   dir: string;
   /** Bytes of the missing files downloaded so far. */
   done: number;

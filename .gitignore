@@ -15,12 +15,13 @@ latest.json
 
 # ---- binaries embedded at build time (see src-tauri/resources/README.md) ---
 # The game binaries come from a superpeople-dev/sp-native release
-# (tools/fetch-binaries.ps1), 7za.exe from 7-Zip.
+# (tools/fetch-binaries.ps1), 7zr.exe from 7-Zip.
 src-tauri/resources/XAPOFX1_5.dll
 src-tauri/resources/SPClientFixes.dll
 src-tauri/resources/client-fixes/
 src-tauri/resources/sp-native.json
 src-tauri/resources/7za.exe
+src-tauri/resources/7zr.exe
 
 # ---- secrets: NEVER commit ---------------------------------------------------
 # The updater's signing key lives in %USERPROFILE%\.tauri\ -- never in the repo.
