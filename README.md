@@ -48,6 +48,13 @@ Rust backend. Windows only.
 - **No-Steam fix.** Before each launch the embedded `XAPOFX1_5.dll` proxy is
   written into the game's `Win64` folder, so the client does not wait for Steam
   (`src-tauri/src/shim.rs`, `src-tauri/resources/README.md`).
+- **Community startup pictures.** Before each launch and after each download,
+  the game's `Splash.bmp`, `EarlyStartupScreen.bmp` and the title screen's
+  `Loading_Scene.mp4` (the loading picture with its three dots, shown while the
+  game signs in and opens the lobby) are the community's own
+  (`src-tauri/startup/`); the Download tab leaves them out, so a repair never
+  brings the old ones back
+  (`src-tauri/src/startup_images.rs`).
 - **Engine.ini patch.** Before each launch, `n.VerifyPeer=False` and related
   settings are applied (`src-tauri/src/engine_ini.rs`).
 - **Starts the real game exe.** The launcher starts
