@@ -36,6 +36,14 @@ export interface InstallState {
   exe_path: string | null;
 }
 
+/** Mirrors `auth::Terms`: what Play needs accepted, from the website. */
+export interface Terms {
+  /** The legal pages' date, YYYY-MM-DD. */
+  version: string;
+  accepted: boolean;
+  docs: { title: string; url: string; intro: string; sections: { title: string; body: string }[] }[];
+}
+
 export interface HostsStatus {
   path: string;
   /** False means the launcher is not running as administrator. */

@@ -579,4 +579,47 @@
 .uninstall__bar{ margin: 8px 0 4px; }
 .uninstall__error{ margin-top: 8px; }
 .uninstall__done{ margin: 4px 0 0; font-family: var(--read); font-size: 13px; }
+
+/* the Terms of Service before Play (TermsDialog.tsx) */
+.dialog__card.terms{ width: min(640px, calc(100% - 40px)); }
+.terms__lead{ margin: 2px 0 10px; }
+.terms__body{
+  max-height: calc(100vh - 250px);
+  overflow-y: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  background: rgba(5,8,12,0.45);
+  font-family: var(--read); font-size: 13px; line-height: 1.55; color: var(--paper-dim);
+}
+.terms__body:focus-visible{ outline: 1px solid var(--line); }
+.terms__body p{ margin: 0 0 10px; }
+.terms__date{ font-size: 11.5px; color: var(--muted); }
+.terms__doc + .terms__doc{ margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
+.terms__title{
+  margin: 0 0 8px;
+  font-family: var(--font); font-size: 15px; font-weight: 900;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--paper);
+}
+.terms__heading{ margin: 12px 0 4px; font-family: var(--read); font-size: 13px; font-weight: 700; color: var(--paper); }
+.terms__link{ font-size: 12.5px; color: var(--signal-hi); }
+.terms__agree{
+  display:flex; align-items:flex-start; gap: 9px; margin-top: 12px;
+  font-family: var(--read); font-size: 13px; color: var(--paper); cursor: pointer;
+}
+.terms__agree.is-locked{ color: var(--muted); cursor: default; }
+.terms__check{
+  appearance: none; flex: 0 0 16px; width: 16px; height: 16px; margin: 1px 0 0;
+  display: grid; place-items: center;
+  border: 1px solid var(--line); border-radius: 2px;
+  background: var(--surface-2); cursor: inherit;
+}
+.terms__check:checked{ background: var(--signal); border-color: var(--signal); }
+.terms__check:checked::after{
+  content: ""; width: 8px; height: 4px;
+  border-left: 2px solid #fff; border-bottom: 2px solid #fff;
+  transform: translateY(-1px) rotate(-45deg);
+}
+.terms__check:disabled{ opacity: 0.5; }
+.terms__check:focus-visible{ outline: 2px solid var(--signal-hi); outline-offset: 2px; }
+.terms__scroll, .terms__problem{ margin: 6px 0 0 25px; }
 .field__count{ float: right; font-weight: 400; letter-spacing: 0; color: #5d6670; font-family: var(--read); }

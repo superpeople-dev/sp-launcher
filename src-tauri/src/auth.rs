@@ -269,6 +269,62 @@ pub async fn exchange(code: &str, verifier: &str) -> Result<(String, Profile)> {
 
 const SIGN_IN_FAILED: &str = "Oops, the Discord sign-in did not go through. Try again.";
 
+// ----------------------------------------------------------------- terms ---
+// Play needs the Terms of Service and the Privacy Policy accepted, here in the
+// launcher: once per Discord account, and again whenever they change (their
+// date on the website is the version). The website keeps who accepted which
+// version (sp-website app/api/launcher/terms); the text comes from there too,
+// so it is the same as on the website's own pages.
+
+/// One of the two documents, as the website's legal pages have it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TermsDoc {
+    pub title: String,
+    pub url: String,
+    pub intro: String,
+    pub sections: Vec<TermsSection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TermsSection {
+    pub title: String,
+    pub body: String,
+}
+
+/// The current terms and whether this Discord account accepted them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Terms {
+    pub version: String,
+    pub accepted: bool,
+    pub docs: Vec<TermsDoc>,
+}
+
+const TERMS_UNAVAILABLE: &str = "Could not load the Terms of Service. Try again in a moment.";
+
+pub async fn terms(session: &str) -> Result<Terms> {
+    let url = format!("{}/api/launcher/terms", site_url());
+    let res = send(client()?.get(url).bearer_auth(session)).await?;
+    match res.status().as_u16() {
+        200 => res.json::<Terms>().await.map_err(|_| LauncherError::Message(TERMS_UNAVAILABLE.into())),
+        401 => Err(LauncherError::SignedOut),
+        _ => Err(LauncherError::Message(TERMS_UNAVAILABLE.into())),
+    }
+}
+
+/// Records that the player accepted `version`, the one they were shown.
+/// TermsRequired: the terms changed meanwhile, and that version is not the
+/// current one any more.
+pub async fn accept_terms(session: &str, version: &str) -> Result<()> {
+    let url = format!("{}/api/launcher/terms", site_url());
+    let res = send(client()?.post(url).bearer_auth(session).json(&serde_json::json!({ "version": version }))).await?;
+    match res.status().as_u16() {
+        200 => Ok(()),
+        401 => Err(LauncherError::SignedOut),
+        409 => Err(LauncherError::TermsRequired),
+        _ => Err(LauncherError::Message(OOPS.into())),
+    }
+}
+
 // ------------------------------------------------------------------ Play ---
 
 /// A game pass from the website for this session.
@@ -278,6 +334,12 @@ pub async fn game_pass(session: &str) -> Result<String> {
     match res.status().as_u16() {
         200 => Ok(res.json::<PassOk>().await.map_err(|_| LauncherError::Message(OOPS.into()))?.pass),
         401 => Err(LauncherError::SignedOut),
+        // The website insists on the terms too (LAUNCHER_TERMS_REQUIRED), and
+        // they changed since this launcher last asked.
+        403 => match res.json::<ApiError>().await.unwrap_or_default().error.as_str() {
+            "terms" => Err(LauncherError::TermsRequired),
+            _ => Err(LauncherError::Message(OOPS.into())),
+        },
         503 => Err(LauncherError::Message(explain("NOT_ENABLED", None))),
         _ => Err(LauncherError::Message(OOPS.into())),
     }
@@ -596,5 +658,20 @@ mod tests {
         // A bare HTTP status (an error page, a missing route) is never shown.
         assert_eq!(explain("HTTP_404", None), OOPS);
         assert!(!explain("HTTP_502", None).contains("502"));
+    }
+
+    #[test]
+    fn terms_read_as_the_website_sends_them() {
+        // sp-website app/api/launcher/terms, GET: acceptedAt is not needed here.
+        let json = r#"{"version":"2026-09-30","docs":[
+            {"title":"Terms of Service","url":"https://superpeople.dev/terms","intro":"These terms apply.",
+             "sections":[{"title":"A fan project","body":"Non-commercial."}]},
+            {"title":"Privacy Policy","url":"https://superpeople.dev/privacy","intro":"As little as we can.","sections":[]}
+        ],"accepted":false,"acceptedAt":null}"#;
+        let terms: Terms = serde_json::from_str(json).expect("terms");
+        assert_eq!(terms.version, "2026-09-30");
+        assert!(!terms.accepted);
+        assert_eq!(terms.docs.len(), 2);
+        assert_eq!(terms.docs[0].sections[0].title, "A fan project");
     }
 }

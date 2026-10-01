@@ -10,6 +10,9 @@ interface Props {
   phase: Phase;
   launchArgs: string;
   busy: boolean;
+  /** The Terms of Service are not accepted yet: Play opens them instead. */
+  locked: boolean;
+  onUnlock: () => void;
   onLaunchArgs: (next: string) => void;
   onPrimary: () => void;
   onLaunch: () => void;
@@ -43,6 +46,25 @@ export function PlayPanel(props: Props) {
                 <span className="cta__label">Get the game</span>
                 <span className="cta__icon">
                   <svg viewBox="0 0 14 14" fill="currentColor"><path d="M3 1.5l9 5.5-9 5.5z" /></svg>
+                </span>
+              </span>
+            </button>
+          ) : props.locked ? (
+            <button
+              className="cta cta--locked"
+              type="button"
+              title="Accept the Terms of Service to play"
+              onClick={props.onUnlock}
+            >
+              <span className="cta__inner">
+                <span className="cta__stack">
+                  <span className="cta__label">Play</span>
+                  <span className="cta__note">Accept the terms to play</span>
+                </span>
+                <span className="cta__icon">
+                  <svg viewBox="0 0 14 14" fill="currentColor">
+                    <path fillRule="evenodd" d="M4.5 6V4.5a2.5 2.5 0 0 1 5 0V6h.75c.41 0 .75.34.75.75v5.5c0 .41-.34.75-.75.75h-6.5a.75.75 0 0 1-.75-.75v-5.5c0-.41.34-.75.75-.75zm1.25 0h2.5V4.5a1.25 1.25 0 0 0-2.5 0z" />
+                  </svg>
                 </span>
               </span>
             </button>

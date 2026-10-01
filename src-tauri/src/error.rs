@@ -20,6 +20,11 @@ pub enum LauncherError {
     /// signed out elsewhere). lib.rs forgets it and shows the welcome screen.
     #[error("Your Discord sign-in has expired. Connect again to continue.")]
     SignedOut,
+
+    /// Play needs the current Terms of Service accepted first (auth.rs
+    /// terms). lib.rs tells the UI, which opens them.
+    #[error("Accept the Terms of Service to play.")]
+    TermsRequired,
 }
 
 impl Serialize for LauncherError {
