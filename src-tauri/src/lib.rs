@@ -399,7 +399,11 @@ fn discord_cancel(app: AppHandle, state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-fn sign_out(state: State<'_, AppState>) -> Result<()> {
+async fn sign_out(state: State<'_, AppState>) -> Result<()> {
+    // #discord-auth-logs hears it first, while the session still works.
+    if let Ok(Some(session)) = session_of(&state) {
+        auth::signed_out(&session).await;
+    }
     forget_sign_in(&state)
 }
 
@@ -792,7 +796,12 @@ async fn uninstall_game(app: AppHandle) -> Result<()> {
             return Err(LauncherError::Message("Close the game before uninstalling it.".into()));
         }
         let dir = state.config.lock().expect("config mutex").install_dir.clone();
-        download::uninstall(&app, &state.download, &dir)
+        let freed = download::uninstall(&app, &state.download, &dir)?;
+        // #launcher-logs, through the website.
+        if let Ok(Some(session)) = session_of(&state) {
+            auth::report(session, serde_json::json!({ "action": "uninstalled", "files": freed.files, "bytes": freed.bytes }));
+        }
+        Ok(())
     })
     .await
     .map_err(|e| LauncherError::Message(e.to_string()))?

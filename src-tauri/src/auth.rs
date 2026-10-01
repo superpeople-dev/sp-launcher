@@ -302,6 +302,32 @@ pub async fn discord_launch(pass: &str, device_id: &str) -> Result<Ticket> {
     Err(LauncherError::Message(explain(&code, err.until.as_deref())))
 }
 
+// ------------------------------------------------------------------ logs ---
+// The team's Discord log channels, through the website (sp-website
+// lib/discord.ts): the launcher never holds a webhook. Best effort: nothing
+// waits on them, and a failure is not the player's problem.
+
+/// What the player did with the game (#launcher-logs): `{"action": …}` plus
+/// numbers (files, bytes, seconds) or the reason a download failed.
+pub fn report(session: String, mut event: serde_json::Value) {
+    if let Some(fields) = event.as_object_mut() {
+        fields.insert("version".into(), env!("CARGO_PKG_VERSION").into());
+    }
+    tauri::async_runtime::spawn(async move {
+        let Ok(client) = client() else { return };
+        let url = format!("{}/api/launcher/log", site_url());
+        let _ = client.post(url).bearer_auth(session).json(&event).send().await;
+    });
+}
+
+/// The player disconnected the launcher (#discord-auth-logs). Waits a few
+/// seconds at most: the sign-out itself is on this PC and happens anyway.
+pub async fn signed_out(session: &str) {
+    let Ok(client) = client() else { return };
+    let url = format!("{}/api/launcher/signout", site_url());
+    let _ = client.post(url).bearer_auth(session).timeout(std::time::Duration::from_secs(5)).send().await;
+}
+
 // ------------------------------------------------------------ http calls ---
 
 pub fn client() -> Result<reqwest::Client> {

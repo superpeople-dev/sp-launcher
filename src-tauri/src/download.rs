@@ -244,7 +244,7 @@ pub fn start(app: &AppHandle, dl: &Downloader, dir: String, verify: bool, sessio
         st.phase = Phase::Checking;
         st.message = "Getting the list of the game's files...".into();
     }
-    let source = Source::Website { session };
+    let source = Source::Website { session: session.clone() };
 
     // The worker reports through this; the Tauri calls stay here, out of the
     // worker's code (a test binary cannot load the webview they bring in).
@@ -253,6 +253,8 @@ pub fn start(app: &AppHandle, dl: &Downloader, dir: String, verify: bool, sessio
         Event::Status(st) => {
             let _ = events.emit("download:status", st);
         }
+        // #launcher-logs, through the website (auth::report).
+        Event::Report(event) => crate::auth::report(session.clone(), event),
         Event::Installed(root) => {
             if let Some(state) = events.try_state::<crate::AppState>() {
                 let mut cfg = state.config.lock().expect("config mutex");
@@ -281,12 +283,15 @@ pub fn start(app: &AppHandle, dl: &Downloader, dir: String, verify: bool, sessio
                 s.eta_secs = None;
                 s.message = "Paused -- press Continue to resume where it stopped.".into();
             }),
-            Err(Stop::Failed(msg)) => ctx.set(|s| {
-                s.phase = Phase::Failed;
-                s.speed = 0.0;
-                s.eta_secs = None;
-                s.message = msg;
-            }),
+            Err(Stop::Failed(msg)) => {
+                (ctx.tell)(Event::Report(serde_json::json!({ "action": "download.failed", "reason": msg })));
+                ctx.set(|s| {
+                    s.phase = Phase::Failed;
+                    s.speed = 0.0;
+                    s.eta_secs = None;
+                    s.message = msg;
+                });
+            }
         }
         running.store(false, Ordering::SeqCst);
         ctx.emit();
@@ -335,7 +340,7 @@ pub fn cancel(app: &AppHandle, dl: &Downloader) -> Result<()> {
 /// folders and exe go (see `remove_game`), so a Game folder that also holds
 /// other files -- or is a whole drive -- keeps them. The folder setting stays:
 /// Download puts the game back in the same place.
-pub fn uninstall(app: &AppHandle, dl: &Downloader, dir: &str) -> Result<()> {
+pub fn uninstall(app: &AppHandle, dl: &Downloader, dir: &str) -> Result<Footprint> {
     if dl.is_running() {
         return Err("A download is running. Cancel it before uninstalling.".into());
     }
@@ -343,6 +348,7 @@ pub fn uninstall(app: &AppHandle, dl: &Downloader, dir: &str) -> Result<()> {
     if dir.is_empty() || !crate::game::detect(dir).installed {
         return Err(LauncherError::Message(format!("There is no game to uninstall in {dir}.")));
     }
+    let freed = footprint(dir);
     // The uninstall window's bar: files deleted so far, of how many.
     let mut last = Instant::now();
     remove_game(Path::new(dir), &mut |done, total| {
@@ -360,7 +366,7 @@ pub fn uninstall(app: &AppHandle, dl: &Downloader, dir: &str) -> Result<()> {
         st.message = "Uninstalled -- the game was deleted.".into();
     }
     let _ = app.emit("download:status", dl.status());
-    Ok(())
+    Ok(freed)
 }
 
 /// The game's own entries in its folder; the exe goes last.
@@ -456,6 +462,8 @@ enum Event {
     Status(Status),
     /// The game is in this folder now: it becomes the Game folder.
     Installed(String),
+    /// For the team's #launcher-logs (`{"action": …}`, see auth::report).
+    Report(serde_json::Value),
 }
 
 type Tell = Arc<dyn Fn(Event) + Send + Sync>;
@@ -503,6 +511,9 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
         jobs.sort_by_key(|f| (is_exe(f), std::cmp::Reverse(f.size)));
     }
     if jobs.is_empty() {
+        if verify {
+            (ctx.tell)(Event::Report(serde_json::json!({ "action": "verify.ok", "files": list.files.len() })));
+        }
         let message = if verify {
             format!("All {} files are fine: nothing to download.", list.files.len())
         } else {
@@ -536,7 +547,18 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
     }
 
     // ---- downloading ---------------------------------------------------
+    if !verify && have == 0 {
+        (ctx.tell)(Event::Report(serde_json::json!({ "action": "download.started", "files": jobs.len(), "bytes": total })));
+    }
+    let started = Instant::now();
     fetch_all(ctx, &client, source, &root, &temp, &jobs, have).await?;
+    (ctx.tell)(Event::Report(if verify {
+        serde_json::json!({ "action": "verify.repaired", "files": jobs.len(), "bytes": total, "source": "storage" })
+    } else {
+        // How long it took, when this run did the whole download.
+        let seconds = (have == 0).then(|| started.elapsed().as_secs());
+        serde_json::json!({ "action": "download.finished", "files": jobs.len(), "bytes": total, "seconds": seconds, "source": "storage" })
+    }));
 
     // ---- done ----------------------------------------------------------
     let message = if verify {
