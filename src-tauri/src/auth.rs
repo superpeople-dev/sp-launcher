@@ -13,7 +13,8 @@
 //! launcher shows Ideas/Roadmap/Completed with, votes and comments with
 //! (community.rs), and what it asks the site for a GAME PASS with when Play is
 //! pressed: two minutes, one use, signed by the site. The game backend checks
-//! the pass and lets that Discord account's game account in.
+//! the pass and lets that Discord account's game account in. With the pass
+//! goes a one-way code of this PC (pcid.rs), so a ban can follow the PC.
 //!
 //! WHY IT IS BUILT THIS WAY
 //! ------------------------
@@ -27,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{LauncherError, Result};
+use crate::pcid;
 
 /// Where the game backend lives. Fixed, like `news::FEED_URL`: it is this
 /// server's API, and a player pointing the launcher elsewhere only breaks
@@ -150,6 +152,9 @@ pub fn explain(code: &str, until: Option<&str>) -> String {
         "NOT_ENABLED" => "The game server does not accept Discord sign-in yet. Try again later.".into(),
         "PASS_INVALID" | "PASS_EXPIRED" | "PASS_USED" => "The server refused the sign-in pass. Press Play again.".into(),
         "RATE_LIMITED" => "Too many attempts. Wait a minute and try again.".into(),
+        "PC_BANNED" => "This PC is banned from playing SUPER PEOPLE. If you think this is a mistake, ask a moderator in Discord.".into(),
+        // The codes are read once per launcher run (pcid.rs): a restart reads them again.
+        "PC_ID_REQUIRED" => "The launcher couldn't identify this PC, which is needed to play. Restart the launcher and try again. If it keeps happening, ask in Discord.".into(),
         "" => OOPS.into(),
         other if other.starts_with("HTTP_") => OOPS.into(),
         other => format!("Oops, something went wrong ({other}). Try again in a moment."),
@@ -347,9 +352,9 @@ pub async fn game_pass(session: &str) -> Result<String> {
 
 /// Hands the pass to the game backend, which answers with the ticket the game
 /// logs in with (and remembers this launch for the game's login).
-pub async fn discord_launch(pass: &str, device_id: &str) -> Result<Ticket> {
+pub async fn discord_launch(pass: &str, device_id: &str, pc: &pcid::Codes) -> Result<Ticket> {
     let url = format!("{AUTH_BASE_URL}/session/discord");
-    let res = send(client()?.post(url).json(&serde_json::json!({ "pass": pass, "device_id": device_id }))).await?;
+    let res = send(client()?.post(url).json(&launch_body(pass, device_id, pc))).await?;
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
     if status.is_success() {
@@ -362,6 +367,13 @@ pub async fn discord_launch(pass: &str, device_id: &str) -> Result<Ticket> {
     let err: ApiError = serde_json::from_str(&text).unwrap_or_default();
     let code = if err.error.is_empty() { format!("HTTP_{}", status.as_u16()) } else { err.error };
     Err(LauncherError::Message(explain(&code, err.until.as_deref())))
+}
+
+/// What Play sends the backend: the pass, this install's id, and this PC's
+/// one-way codes, `{"v": 1, "board", "disk", "windows"}`, each code left out
+/// when it could not be read. A backend that does not know `pc` ignores it.
+fn launch_body(pass: &str, device_id: &str, pc: &pcid::Codes) -> serde_json::Value {
+    serde_json::json!({ "pass": pass, "device_id": device_id, "pc": pc })
 }
 
 // ------------------------------------------------------------------ logs ---
@@ -485,7 +497,7 @@ mod secret {
             )
         };
         if ok == 0 {
-            return Err(LauncherError::Message("Windows refused to encrypt the key.".into()));
+            return Err(LauncherError::Message("Windows refused to encrypt your sign-in.".into()));
         }
         Ok(unsafe { take(output) })
     }
@@ -508,7 +520,7 @@ mod secret {
             // Wrong user, wrong machine, or a corrupted blob. All of them mean
             // the same thing to the player: sign in again.
             return Err(LauncherError::Message(
-                "The stored key could not be read. Please enter it again.".into(),
+                "The saved sign-in could not be read. Connect again.".into(),
             ));
         }
         Ok(unsafe { take(output) })
@@ -653,11 +665,27 @@ mod tests {
         assert!(explain("KEY_SUSPENDED", None).contains("suspended"));
         assert!(explain("KEY_REVOKED", None).contains("banned"));
         assert!(explain("PASS_USED", None).contains("Play again"));
+        assert!(explain("PC_BANNED", None).contains("This PC is banned"));
+        assert!(explain("PC_ID_REQUIRED", None).contains("Restart the launcher"));
         // An unfamiliar code must still be visible, not swallowed.
         assert!(explain("SOME_NEW_CODE", None).contains("SOME_NEW_CODE"));
         // A bare HTTP status (an error page, a missing route) is never shown.
         assert_eq!(explain("HTTP_404", None), OOPS);
         assert!(!explain("HTTP_502", None).contains("502"));
+    }
+
+    #[test]
+    fn play_sends_the_pc_codes_it_has_and_always_v() {
+        let none = pcid::Codes::default();
+        assert_eq!(
+            launch_body("p", "d", &none),
+            serde_json::json!({ "pass": "p", "device_id": "d", "pc": { "v": 1 } })
+        );
+        let two = pcid::Codes { board: Some("b".into()), windows: Some("w".into()), ..pcid::Codes::default() };
+        assert_eq!(
+            launch_body("p", "d", &two),
+            serde_json::json!({ "pass": "p", "device_id": "d", "pc": { "v": 1, "board": "b", "windows": "w" } })
+        );
     }
 
     #[test]
