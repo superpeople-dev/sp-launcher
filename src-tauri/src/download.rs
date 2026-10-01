@@ -36,6 +36,13 @@
 //! range request with a full `200` is detected and that file restarts from
 //! zero rather than being corrupted by a second copy.
 //!
+//! Verify files remembers the files it found fine (`Saved::fine`: size, time
+//! and expected SHA-256), so a run that stopped carries on from there.
+//!
+//! Updating the launcher in the middle of a download or Verify files pauses
+//! it first (`pause_for_update`, files closed), and the updated launcher
+//! continues it by itself once the player is signed in (`take_resume`).
+//!
 //! Network errors are retried per file (backoff 2 s .. 30 s, 25 tries); a
 //! stalled stream (no byte for 45 s) counts as an error. A file whose checksum
 //! does not match is deleted and fetched again.
@@ -208,6 +215,30 @@ struct Saved {
     total: u64,
     /// A Verify files run: Continue carries on checking hashes.
     verify: bool,
+    /// The launcher closed itself for its own update in the middle of this
+    /// run (`pause_for_update`): the next start continues it without a click.
+    resume: bool,
+    /// Verify files: the files this run already found fine, so a run that
+    /// stopped carries on from there instead of reading the whole game again.
+    fine: Vec<FineFile>,
+}
+
+/// A file Verify files found fine, as it was then: a different size, time or
+/// expected checksum and it is checked again.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FineFile {
+    path: String,
+    size: u64,
+    /// Last write, in milliseconds since 1970.
+    modified: u64,
+    sha256: String,
+}
+
+/// A file's size and last write time, as `FineFile` keeps them.
+fn stamp(path: &Path) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64;
+    Some((meta.len(), modified))
 }
 
 /// The website's list of the game's files.
@@ -390,6 +421,52 @@ pub fn pause(dl: &Downloader) {
     if dl.is_running() {
         dl.stop.store(true, Ordering::SeqCst);
     }
+}
+
+/// The launcher is about to close for its own update: a running download or
+/// Verify files stops where it is, its files closed, and the updated launcher
+/// continues it (`take_resume`). True if one was running.
+pub fn pause_for_update(dl: &Downloader) -> bool {
+    if !dl.is_running() {
+        return false;
+    }
+    dl.stop.store(true, Ordering::SeqCst);
+    // A download stops within a chunk, Verify files within a 4 MB read,
+    // 7-Zip as soon as it is killed.
+    for _ in 0..100 {
+        if !dl.is_running() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let mut saved = load_saved(&dl.config_dir);
+    if saved.dir.is_empty() {
+        return false;
+    }
+    saved.resume = true;
+    store_saved(&dl.config_dir, &saved).is_ok()
+}
+
+/// What `pause_for_update` stopped, once: its folder, and whether it was
+/// Verify files.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Resume {
+    pub dir: String,
+    pub verify: bool,
+}
+
+/// The run an update interrupted, if any, and forget it: it continues once.
+pub fn take_resume(dl: &Downloader) -> Option<Resume> {
+    if dl.is_running() {
+        return None;
+    }
+    let mut saved = load_saved(&dl.config_dir);
+    if !saved.resume || saved.dir.is_empty() {
+        return None;
+    }
+    saved.resume = false;
+    let _ = store_saved(&dl.config_dir, &saved);
+    Some(Resume { dir: saved.dir, verify: saved.verify })
 }
 
 /// Stop and delete what this download has not finished (the temp folder).
@@ -596,7 +673,7 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
     let root = find_install_root(&ctx.dir).unwrap_or_else(|| ctx.dir.clone());
     let mut jobs = missing(&root, &list.files);
     if verify {
-        let damaged = damaged(ctx, &root, &list.files, &jobs).await?;
+        let damaged = damaged(ctx, &root, &list.files, &jobs, &mut saved).await?;
         jobs.extend(damaged);
         jobs.sort_by_key(|f| (is_exe(f), std::cmp::Reverse(f.size)));
     }
@@ -706,16 +783,40 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
 /// Verify files: the files of the right size whose SHA-256 is wrong anyway.
 /// Reads the whole game, so it reports progress like a download and stops
 /// for Pause.
-async fn damaged(ctx: &Ctx, root: &Path, files: &[GameFile], missing: &[GameFile]) -> std::result::Result<Vec<GameFile>, Stop> {
+///
+/// The files found fine go into `saved.fine` (on disk every few seconds and at
+/// a pause), and a run that continues skips those still the same: Pause, a
+/// restart or a launcher update cost only the file being read.
+async fn damaged(ctx: &Ctx, root: &Path, files: &[GameFile], missing: &[GameFile], saved: &mut Saved) -> std::result::Result<Vec<GameFile>, Stop> {
     let skip: std::collections::HashSet<&str> = missing.iter().map(|f| f.path.as_str()).collect();
     let check: Vec<(PathBuf, GameFile)> =
         files.iter().filter(|f| !skip.contains(f.path.as_str())).map(|f| (target_path(root, f), f.clone())).collect();
     let total: u64 = check.iter().map(|(_, f)| f.size).sum();
+    // Still exactly as found fine: same size, time and expected checksum.
+    let known: std::collections::HashMap<String, FineFile> = std::mem::take(&mut saved.fine).into_iter().map(|f| (f.path.clone(), f)).collect();
+    let still_fine = |path: &Path, file: &GameFile| {
+        known.get(&file.path).is_some_and(|f| {
+            f.sha256 == file.sha256 && f.size == file.size && stamp(path) == Some((f.size, f.modified))
+        })
+    };
+    let mut fine: Vec<FineFile> = Vec::new();
+    let mut todo: Vec<(PathBuf, GameFile)> = Vec::new();
+    for (path, file) in check {
+        if still_fine(&path, &file) {
+            fine.push(known[&file.path].clone());
+        } else {
+            todo.push((path, file));
+        }
+    }
+    let skipped = fine.len();
+    let count = skipped + todo.len();
+    let skipped_bytes: u64 = fine.iter().map(|f| f.size).sum();
+    saved.fine = fine;
     ctx.set(|s| {
         s.phase = Phase::Checking;
-        s.done = 0;
+        s.done = skipped_bytes;
         s.total = total;
-        s.message = format!("Checking files: 0 of {}", check.len());
+        s.message = format!("Checking files: {skipped} of {count}");
     });
     ctx.emit();
 
@@ -723,13 +824,18 @@ async fn damaged(ctx: &Ctx, root: &Path, files: &[GameFile], missing: &[GameFile
     let stop = ctx.stop.clone();
     let tell = ctx.tell.clone();
     let dir = ctx.dir.clone();
-    let found = tokio::task::spawn_blocking(move || -> Option<Vec<GameFile>> {
+    let config_dir = ctx.config_dir.clone();
+    let mut progress = saved.clone();
+    let (found, progress) = tokio::task::spawn_blocking(move || -> (Option<Vec<GameFile>>, Saved) {
         let mut bad = Vec::new();
         let mut buf = vec![0u8; 4 * 1024 * 1024];
-        let mut done = 0u64;
+        let mut done = skipped_bytes;
         let mut meter = Meter::new();
         let mut last = Instant::now();
-        for (i, (path, file)) in check.iter().enumerate() {
+        let mut last_store = Instant::now();
+        for (i, (path, file)) in todo.iter().enumerate() {
+            let i = skipped + i;
+            let before = stamp(path);
             let mut hasher = Sha256::new();
             let Ok(mut reader) = std::fs::File::open(path) else {
                 bad.push(file.clone());
@@ -737,7 +843,8 @@ async fn damaged(ctx: &Ctx, root: &Path, files: &[GameFile], missing: &[GameFile
             };
             loop {
                 if stop.load(Ordering::SeqCst) {
-                    return None;
+                    let _ = store_saved(&config_dir, &progress);
+                    return (None, progress);
                 }
                 let n = match reader.read(&mut buf) {
                     Ok(0) => break,
@@ -759,7 +866,7 @@ async fn damaged(ctx: &Ctx, root: &Path, files: &[GameFile], missing: &[GameFile
                         st.done = done;
                         st.speed = speed;
                         st.eta_secs = eta(total.saturating_sub(done), speed);
-                        st.message = format!("Checking files: {} of {}", i + 1, check.len());
+                        st.message = format!("Checking files: {} of {count}", i + 1);
                         st.clone()
                     };
                     tell(Event::Status(Status { free_bytes: free_space(&dir), ..snapshot }));
@@ -767,12 +874,21 @@ async fn damaged(ctx: &Ctx, root: &Path, files: &[GameFile], missing: &[GameFile
             }
             if hex(&hasher.finalize()) != file.sha256 {
                 bad.push(file.clone());
+            } else if let Some((size, modified)) = before.filter(|b| stamp(path) == Some(*b)) {
+                // Unchanged while it was read: remembered as fine.
+                progress.fine.push(FineFile { path: file.path.clone(), size, modified, sha256: file.sha256.clone() });
+                if last_store.elapsed() >= Duration::from_secs(2) {
+                    let _ = store_saved(&config_dir, &progress);
+                    last_store = Instant::now();
+                }
             }
         }
-        Some(bad)
+        let _ = store_saved(&config_dir, &progress);
+        (Some(bad), progress)
     })
     .await
     .map_err(|e| Stop::Failed(e.to_string()))?;
+    *saved = progress;
     found.ok_or(Stop::Paused)
 }
 
@@ -2412,6 +2528,71 @@ mod tests {
     }
 
     #[test]
+    fn an_update_pauses_the_download_and_the_next_start_continues_it_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let dl = Downloader::new(config.clone());
+        assert!(!pause_for_update(&dl), "nothing running: nothing to continue");
+
+        // A Verify files run in progress, which stops when asked, as the worker does.
+        store_saved(&config, &Saved { dir: "D:\\Games\\SP".into(), verify: true, ..Default::default() }).unwrap();
+        dl.running.store(true, Ordering::SeqCst);
+        let (stop, running) = (dl.stop.clone(), dl.running.clone());
+        let worker = std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            running.store(false, Ordering::SeqCst);
+        });
+        assert!(pause_for_update(&dl));
+        worker.join().unwrap();
+        assert!(!dl.is_running(), "stopped before the update installs");
+
+        assert_eq!(take_resume(&dl), Some(Resume { dir: "D:\\Games\\SP".into(), verify: true }));
+        assert_eq!(take_resume(&dl), None, "it continues once");
+        assert_eq!(load_saved(&config).dir, "D:\\Games\\SP", "the run itself is kept");
+    }
+
+    #[tokio::test]
+    async fn verify_files_continues_where_it_stopped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        std::fs::create_dir_all(&ctx.config_dir).unwrap();
+        let (a, b) = (b"aaaa-original".to_vec(), b"bbbb-original".to_vec());
+        let files = vec![entry("BravoHotelGame/a.pak", &a), entry("BravoHotelGame/b.pak", &b)];
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("BravoHotelGame")).unwrap();
+        std::fs::write(root.join("BravoHotelGame/a.pak"), &a).unwrap();
+        std::fs::write(root.join("BravoHotelGame/b.pak"), &b).unwrap();
+
+        // A first run finds both fine and remembers them.
+        let mut saved = Saved { dir: root.to_string_lossy().into_owned(), verify: true, ..Default::default() };
+        assert!(damaged(&ctx, root, &files, &[], &mut saved).await.ok().unwrap().is_empty());
+        assert_eq!(saved.fine.len(), 2);
+        assert_eq!(load_saved(&ctx.config_dir).fine.len(), 2, "kept on disk for a restart");
+
+        // a changes but keeps its size and time: a continued run does not read it
+        // again (the proof it was skipped). b changes and its time moves on.
+        let a_path = root.join("BravoHotelGame/a.pak");
+        let a_time = std::fs::metadata(&a_path).unwrap().modified().unwrap();
+        std::fs::write(&a_path, b"aaaa-changed!").unwrap();
+        std::fs::File::options().write(true).open(&a_path).unwrap().set_modified(a_time).unwrap();
+        let b_path = root.join("BravoHotelGame/b.pak");
+        std::fs::write(&b_path, b"bbbb-changed!").unwrap();
+        let later = std::fs::metadata(&b_path).unwrap().modified().unwrap() + Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&b_path).unwrap().set_modified(later).unwrap();
+
+        let bad = damaged(&ctx, root, &files, &[], &mut saved).await.ok().unwrap();
+        assert_eq!(bad.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec!["BravoHotelGame/b.pak"]);
+
+        // A new expected checksum is checked again whatever the file's time.
+        let renewed = vec![entry("BravoHotelGame/a.pak", b"aaaa-newbuild"), files[1].clone()];
+        let bad = damaged(&ctx, root, &renewed, &[], &mut saved).await.ok().unwrap();
+        assert!(bad.iter().any(|f| f.path == "BravoHotelGame/a.pak"));
+    }
+
+    #[test]
     fn pieces_are_named_and_cut_for_seven_zip() {
         let temp = Path::new("t");
         let pieces = Pieces::new(temp, 3 * PIECE + 10);
@@ -2624,8 +2805,9 @@ mod tests {
         let missing_now = missing(tmp.path(), &files);
         assert_eq!(missing_now.len(), 1, "only the absent file is missing by size");
         let ctx = test_ctx(tmp.path());
+        let mut saved = Saved::default();
         let damaged: Vec<String> =
-            damaged(&ctx, tmp.path(), &files, &missing_now).await.ok().unwrap().into_iter().map(|f| f.path).collect();
+            damaged(&ctx, tmp.path(), &files, &missing_now, &mut saved).await.ok().unwrap().into_iter().map(|f| f.path).collect();
         assert_eq!(damaged, ["BravoHotelGame/bad.pak"]);
     }
 

@@ -789,6 +789,20 @@ fn download_pause(state: State<'_, AppState>) {
     download::pause(&state.download);
 }
 
+/// Before installing a launcher update: a running download or Verify files
+/// stops where it is and the updated launcher continues it. True if one was
+/// running. Async: it waits up to 10 s for the files to close.
+#[tauri::command]
+async fn download_pause_for_update(state: State<'_, AppState>) -> Result<bool> {
+    Ok(download::pause_for_update(&state.download))
+}
+
+/// The run a launcher update interrupted, once (the frontend starts it again).
+#[tauri::command]
+fn download_take_resume(state: State<'_, AppState>) -> Option<download::Resume> {
+    download::take_resume(&state.download)
+}
+
 #[tauri::command]
 async fn download_cancel(app: AppHandle, state: State<'_, AppState>) -> Result<()> {
     download::cancel(&app, &state.download)
@@ -984,6 +998,8 @@ pub fn run() {
             download_status,
             download_start,
             download_pause,
+            download_pause_for_update,
+            download_take_resume,
             download_cancel,
             download_default_dir,
             find_game,
