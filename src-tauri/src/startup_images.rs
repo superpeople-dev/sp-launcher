@@ -1,8 +1,11 @@
 //! The game's startup pictures, delivered with the launcher.
 //!
 //! `Splash.bmp` is the small window Unreal shows while the engine starts,
-//! `EarlyStartupScreen.bmp` the full-screen picture after it. The community's
-//! own pictures replace the original publisher's in every install:
+//! `EarlyStartupScreen.bmp` the full-screen picture after it, and
+//! `Loading_Scene.mp4` the video the title screen loops while the game signs
+//! in and opens the lobby (the same picture as the loading screen, with its
+//! three dots). The community's own files replace the original publisher's in
+//! every install:
 //! it is written at each Play and after each download, compared by content,
 //! so an unchanged one costs a read and nothing else. A launcher update that
 //! brings a new picture puts it in place at the next Play by itself.
@@ -12,9 +15,10 @@
 //! download, a repair or Verify files never brings the old picture back, and
 //! never fetches a file the launcher writes anyway.
 //!
-//! The pictures live in `src-tauri/startup/`, exactly as the game reads them:
+//! The files live in `src-tauri/startup/`, exactly as the game reads them:
 //! 24-bit BMP, the size of what they fill (830 x 400 for the splash window,
-//! 1920 x 1080 for the full-screen one).
+//! 1920 x 1080 for the full-screen one), and an MP4 the engine's media player
+//! opens.
 
 use std::path::{Path, PathBuf};
 
@@ -27,6 +31,7 @@ const IMAGES: &[(&str, &[u8])] = &[
         "BravoHotelGame/Content/EarlyStartupScreen/EarlyStartupScreen.bmp",
         include_bytes!("../startup/EarlyStartupScreen.bmp"),
     ),
+    ("BravoHotelGame/Content/Movies/Loading_Scene.mp4", include_bytes!("../startup/Loading_Scene.mp4")),
 ];
 
 /// A file the launcher writes itself, which the Download tab leaves out.
@@ -38,7 +43,13 @@ fn target(root: &Path, path: &str) -> PathBuf {
     path.split('/').fold(root.to_path_buf(), |p, part| p.join(part))
 }
 
-/// Puts every picture that is not already exactly ours in place; how many
+fn tmp_of(file: &Path) -> PathBuf {
+    let mut name = file.file_name().unwrap_or_default().to_os_string();
+    name.push(".new");
+    file.with_file_name(name)
+}
+
+/// Puts every file that is not already exactly ours in place; how many
 /// were written. Only into a folder that has the game (`BravoHotelGame`): a
 /// wrong folder in Settings gets nothing written into it. Must run while the
 /// game is closed.
@@ -56,8 +67,8 @@ pub fn apply(install_dir: &str) -> Result<usize> {
         if let Some(dir) = file.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        // Next to it, then over it: the game never finds half a picture.
-        let tmp = file.with_extension("bmp.new");
+        // Next to it, then over it: the game never finds half a file.
+        let tmp = tmp_of(&file);
         std::fs::write(&tmp, bytes)?;
         if let Err(e) = std::fs::rename(&tmp, &file) {
             let _ = std::fs::remove_file(&tmp);
@@ -73,9 +84,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_pictures_are_bmps_the_game_can_read() {
-        for (path, bytes) in IMAGES {
-            assert!(path.ends_with(".bmp"), "{path}");
+    fn the_files_are_ones_the_game_can_read() {
+        for (path, bytes) in IMAGES.iter().filter(|(p, _)| !p.ends_with(".bmp")) {
+            assert!(path.ends_with(".mp4"), "{path}");
+            assert_eq!(&bytes[4..8], b"ftyp", "{path}: an MP4 starts with its ftyp box");
+        }
+        for (path, bytes) in IMAGES.iter().filter(|(p, _)| p.ends_with(".bmp")) {
             assert_eq!(&bytes[..2], b"BM", "{path}");
             let bpp = u16::from_le_bytes([bytes[28], bytes[29]]);
             assert_eq!(bpp, 24, "{path}: Unreal's splash reads 24-bit BMPs");
@@ -104,13 +118,17 @@ mod tests {
             assert_eq!(std::fs::read(target(tmp.path(), path)).unwrap(), *bytes, "{path}");
         }
         assert_eq!(apply(&dir).unwrap(), 0, "already ours: nothing written");
-        assert!(!splash.with_extension("bmp.new").exists());
+        for (path, _) in IMAGES {
+            assert!(!tmp_of(&target(tmp.path(), path)).exists(), "{path}");
+        }
     }
 
     #[test]
     fn the_download_tab_leaves_them_out() {
         assert!(is_ours("BravoHotelGame/Content/Splash/Splash.bmp"));
         assert!(is_ours("BravoHotelGame/Content/EarlyStartupScreen/EarlyStartupScreen.bmp"));
+        assert!(is_ours("BravoHotelGame/Content/Movies/Loading_Scene.mp4"));
+        assert!(!is_ours("BravoHotelGame/Content/Movies/ClassVideos/Loading_Scene.mp4"));
         assert!(!is_ours("BravoHotelGame/Content/Paks/pakchunk0-WindowsClient.pak"));
     }
 }
