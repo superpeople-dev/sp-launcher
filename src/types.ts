@@ -92,7 +92,7 @@ export type Vote = "up" | "down";
 
 export interface Person {
   name: string;
-  /** Discord avatar URL; the initial is drawn when there is none. */
+  /** Discord avatar URL; Discord's default picture is drawn when there is none (Avatar.tsx). */
   avatar: string | null;
 }
 
