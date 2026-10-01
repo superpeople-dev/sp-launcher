@@ -32,3 +32,18 @@ ships without them, and logs `this launcher has no DLL bundled` at launch.
 They are deliberately not in version control: they are build artifacts of
 sp-native, and a stale copy committed by accident is worse than no copy.
 
+## 7zr.exe  — for the Download tab's backup
+
+When the game's storage cannot serve (its limit reached, blocked where the
+player is), the Download tab downloads the backup archive from archive.org and
+unpacks the missing files with 7-Zip (`src/download.rs`). `build.rs` embeds
+`resources/7zr.exe` when it is present and the launcher writes it to
+`%APPDATA%\com.superpeople.launcher\tools\7zr.exe` the first time it is
+needed. Without it the backup needs 7-Zip installed on the player's PC.
+
+The workflows fetch it from 7-Zip's GitHub release and check it against the
+SHA-256 GitHub lists (`release.yml`, `unsigned-build.yml`). By hand: download
+`7zr.exe` from https://github.com/ip7z/7zip/releases (26.03) and check it with
+`Get-FileHash`. 7-Zip is LGPL-licensed; shipping it inside the launcher is fine.
+
+Not in version control, like the game binaries.

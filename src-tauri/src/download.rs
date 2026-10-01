@@ -40,6 +40,18 @@
 //! stalled stream (no byte for 45 s) counts as an error. A file whose checksum
 //! does not match is deleted and fetched again.
 //!
+//! THE BACKUP
+//! ----------
+//! When the storage cannot serve -- its monthly limit reached, blocked where
+//! the player is, down -- the launcher quietly turns to the backup copy: the
+//! same game in one 7z on archive.org (the list says where, `backup`). Up to
+//! 2 GB still missing (a repair), those files come one by one, unpacked by
+//! archive.org; more, and the whole archive comes down (resumable) and 7-Zip
+//! unpacks only what is missing. Either way every file is checked against the
+//! same list. The website can send launchers there at once (`backup.only`).
+//! It turns to the backup after STORAGE_TRIES tries in a row that brought
+//! nothing, on any file. Nothing on screen says which source it was.
+//!
 //! While a download runs, Windows is asked not to go to sleep
 //! (`SetThreadExecutionState`); the display may still turn off.
 
@@ -74,6 +86,21 @@ const TEMP_DIR: &str = ".sp-download";
 const OLD_ARCHIVE_PART: &str = "Manifest #2065353802481281242.7z.part";
 const MAX_RETRIES: u32 = 25;
 const STALL_TIMEOUT: Duration = Duration::from_secs(45);
+/// Tries in a row that bring nothing from the storage before turning to the
+/// backup.
+const STORAGE_TRIES: u32 = 4;
+/// Up to this much still missing, the backup sends single files; more, and the
+/// whole archive is downloaded and unpacked here.
+const BACKUP_SINGLE_FILES: u64 = 2 * 1024 * 1024 * 1024;
+/// Single files from the backup at once: archive.org unpacks each on its side.
+const BACKUP_PARALLEL: usize = 4;
+/// archive.org can take a while to start sending a file it unpacks.
+const BACKUP_STALL: Duration = Duration::from_secs(120);
+/// In the backup's temp files: the archive, and where it is unpacked.
+const ARCHIVE_PART: &str = "game.7z.part";
+const UNPACK_DIR: &str = "unpacked";
+/// A retry countdown's step (shorter in tests).
+const TICK: Duration = if cfg!(test) { Duration::from_millis(10) } else { Duration::from_secs(1) };
 const EMIT_EVERY: Duration = Duration::from_millis(250);
 
 // ------------------------------------------------------------------ types ---
@@ -85,6 +112,8 @@ pub enum Phase {
     Idle,
     Checking,
     Downloading,
+    /// Unpacking the backup archive (only when the storage could not serve).
+    Preparing,
     /// Stopped by the user (or by a launcher restart); the `.part` files stay.
     Paused,
     Done,
@@ -149,6 +178,23 @@ struct Saved {
 #[derive(Debug, Clone, Deserialize)]
 struct GameList {
     files: Vec<GameFile>,
+    /// The same game in one archive elsewhere, for when the storage cannot
+    /// serve. Absent from older answers: no backup then.
+    #[serde(default)]
+    backup: Option<Backup>,
+}
+
+/// The backup copy (sp-website lib/downloads.ts): the game in one 7z on
+/// archive.org, under `folder` inside it.
+#[derive(Debug, Clone, Deserialize)]
+struct Backup {
+    url: String,
+    /// The game's folder inside the archive, with its trailing `/`.
+    folder: String,
+    size: u64,
+    /// The storage is switched off: go to the backup at once.
+    #[serde(default)]
+    only: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -283,7 +329,11 @@ pub fn start(app: &AppHandle, dl: &Downloader, dir: String, verify: bool, sessio
                 s.eta_secs = None;
                 s.message = "Paused -- press Continue to resume where it stopped.".into();
             }),
-            Err(Stop::Failed(msg)) => {
+            Err(stop @ (Stop::Failed(_) | Stop::Backup)) => {
+                let msg = match stop {
+                    Stop::Failed(msg) => msg,
+                    _ => "The download could not be finished. Press Continue to try again -- your progress is kept.".to_string(),
+                };
                 (ctx.tell)(Event::Report(serde_json::json!({ "action": "download.failed", "reason": msg })));
                 ctx.set(|s| {
                     s.phase = Phase::Failed;
@@ -449,6 +499,8 @@ fn remove_game(root: &Path, progress: &mut dyn FnMut(u64, u64)) -> std::io::Resu
 enum Stop {
     Paused,
     Failed(String),
+    /// The storage cannot serve: turn to the backup (never leaves `run`).
+    Backup,
 }
 
 impl<E: std::fmt::Display> From<E> for Stop {
@@ -551,13 +603,28 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
         (ctx.tell)(Event::Report(serde_json::json!({ "action": "download.started", "files": jobs.len(), "bytes": total })));
     }
     let started = Instant::now();
-    fetch_all(ctx, &client, source, &root, &temp, &jobs, have).await?;
+    let backup = list.backup.as_ref();
+    let storage = if backup.is_some_and(|b| b.only) {
+        Err(Stop::Backup)
+    } else {
+        fetch_parts(ctx, &client, source, &temp, &jobs, have, backup.is_some()).await
+    };
+    let from = match storage {
+        Ok(()) => "storage",
+        Err(Stop::Backup) => {
+            let backup = backup.ok_or_else(|| Stop::Failed("The game's download server cannot be reached. Try again later -- your progress is kept.".into()))?;
+            from_backup(ctx, &client, backup, &temp, &jobs, BACKUP_SINGLE_FILES).await?;
+            "backup"
+        }
+        Err(stop) => return Err(stop),
+    };
+    place_all(ctx, &root, &temp, &jobs)?;
     (ctx.tell)(Event::Report(if verify {
-        serde_json::json!({ "action": "verify.repaired", "files": jobs.len(), "bytes": total, "source": "storage" })
+        serde_json::json!({ "action": "verify.repaired", "files": jobs.len(), "bytes": total, "source": from })
     } else {
         // How long it took, when this run did the whole download.
         let seconds = (have == 0).then(|| started.elapsed().as_secs());
-        serde_json::json!({ "action": "download.finished", "files": jobs.len(), "bytes": total, "seconds": seconds, "source": "storage" })
+        serde_json::json!({ "action": "download.finished", "files": jobs.len(), "bytes": total, "seconds": seconds, "source": from })
     }));
 
     // ---- done ----------------------------------------------------------
@@ -698,6 +765,12 @@ fn check_list(list: &GameList) -> std::result::Result<(), String> {
     if !list.files.iter().any(|f| f.path == crate::game::GAME_EXE) {
         return Err(format!("{} is not in it", crate::game::GAME_EXE));
     }
+    if let Some(backup) = &list.backup {
+        let folder = backup.folder.strip_suffix('/').unwrap_or(&backup.folder);
+        if !backup.url.starts_with("https://") || (!folder.is_empty() && (!backup.folder.ends_with('/') || !safe_path(folder))) {
+            return Err("the backup is not valid".into());
+        }
+    }
     Ok(())
 }
 
@@ -746,9 +819,25 @@ enum Source {
     /// The website: a 15-minute link per file for the signed-in player, within
     /// the download limits (sp-website app/api/launcher/game/link).
     Website { session: String },
-    /// `base` plus the file's path (the tests' local server).
+    /// The backup: one file from inside its archive, which archive.org unpacks
+    /// on its side (slowly, and from the start each time).
+    Archive { url: String, folder: String },
+    /// `base` plus the file's path (the tests' local server, as the storage).
     #[cfg(test)]
     Base(String),
+}
+
+impl Source {
+    /// The storage, which the backup can stand in for.
+    fn is_storage(&self) -> bool {
+        !matches!(self, Source::Archive { .. })
+    }
+    fn stall(&self) -> Duration {
+        if self.is_storage() { STALL_TIMEOUT } else { BACKUP_STALL }
+    }
+    fn parallel(&self) -> usize {
+        if self.is_storage() { PARALLEL } else { BACKUP_PARALLEL }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -766,6 +855,7 @@ async fn link(client: &reqwest::Client, source: &Source, job: &GameFile) -> std:
     let session = match source {
         #[cfg(test)]
         Source::Base(base) => return Ok(file_url(base, &job.path)),
+        Source::Archive { url, folder } => return Ok(format!("{url}/{}", encode_all(&format!("{folder}{}", job.path)))),
         Source::Website { session } => session,
     };
     let resp = client
@@ -792,9 +882,8 @@ async fn link(client: &reqwest::Client, source: &Source, job: &GameFile) -> std:
         )),
         429 => Err(Miss::Fatal(limit_reached(answer.until))),
         404 => Err(Miss::Fatal(format!("{} is no longer in the game's file list. Press Continue to get the new list.", job.path))),
-        503 if answer.error.as_deref() == Some("setup") => {
-            Err(Miss::Fatal("Game downloads are not open yet. Try again later -- your progress is kept.".into()))
-        }
+        // The storage is not set up: the backup, if there is one.
+        503 if answer.error.as_deref() == Some("setup") => Err(Miss::Backup),
         _ => Err(Miss::Retry(format!("superpeople.dev answered {status}"))),
     }
 }
@@ -808,6 +897,14 @@ fn limit_reached(until_ms: Option<u64>) -> String {
         "Downloads are paused for {wait}: this account or internet connection downloaded more than twice the game \
          in the last hour. Your progress is kept. If this is a mistake, ask the team on Discord."
     )
+}
+
+/// Every byte but letters, digits and `-._~` percent-encoded, `/` too: a
+/// path inside an archive, as archive.org's own links write it.
+fn encode_all(text: &str) -> String {
+    text.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
 }
 
 /// `base` plus the path, every part percent-encoded.
@@ -837,6 +934,10 @@ struct Progress {
     files: usize,
     meter: Mutex<Meter>,
     last_emit: Mutex<Instant>,
+    /// There is a backup to turn to when the storage cannot serve.
+    fallback: bool,
+    /// The storage gave up: every file stops and the backup takes over.
+    to_backup: AtomicBool,
 }
 
 impl Progress {
@@ -870,20 +971,26 @@ impl Progress {
         ctx.emit();
     }
 
+    fn turning_to_backup(&self) -> bool {
+        self.to_backup.load(Ordering::SeqCst)
+    }
+
     fn file_finished(&self, ctx: &Ctx) {
         let n = self.files_done.fetch_add(1, Ordering::SeqCst) + 1;
         ctx.set(|s| s.message = format!("{n} of {} files", self.files));
     }
 }
 
-async fn fetch_all(
+/// Every file of `jobs` into its `.part`, checked, several at once. With
+/// `fallback`, gives up as `Stop::Backup` when the storage cannot serve.
+async fn fetch_parts(
     ctx: &Ctx,
     client: &reqwest::Client,
     source: &Source,
-    root: &Path,
     temp: &Path,
     jobs: &[GameFile],
     have: u64,
+    fallback: bool,
 ) -> std::result::Result<(), Stop> {
     use futures_util::StreamExt;
 
@@ -896,6 +1003,8 @@ async fn fetch_all(
         files: jobs.len(),
         meter: Mutex::new(Meter::new()),
         last_emit: Mutex::new(Instant::now()),
+        fallback: fallback && source.is_storage(),
+        to_backup: AtomicBool::new(false),
     };
     ctx.set(|s| {
         s.phase = Phase::Downloading;
@@ -907,7 +1016,7 @@ async fn fetch_all(
 
     // Collected first: a lazy `map` closure here would not be Send.
     let tries: Vec<_> = jobs.iter().map(|job| fetch_one(ctx, client, source, temp, job, &progress)).collect();
-    let mut results = futures_util::stream::iter(tries).buffer_unordered(PARALLEL);
+    let mut results = futures_util::stream::iter(tries).buffer_unordered(source.parallel());
     let mut paused = false;
     while let Some(result) = results.next().await {
         match result {
@@ -921,10 +1030,13 @@ async fn fetch_all(
     if paused || ctx.stopped() {
         return Err(Stop::Paused);
     }
+    ctx.set(|s| s.done = progress.done.load(Ordering::SeqCst));
+    Ok(())
+}
 
-    // Everything checked: the files go into place, the exe last.
+/// Everything checked: the files go into place, the exe last.
+fn place_all(ctx: &Ctx, root: &Path, temp: &Path, jobs: &[GameFile]) -> std::result::Result<(), Stop> {
     ctx.set(|s| {
-        s.done = progress.done.load(Ordering::SeqCst);
         s.speed = 0.0;
         s.eta_secs = None;
         s.message = format!("Putting the {} files in place...", jobs.len());
@@ -944,14 +1056,15 @@ async fn fetch_all(
 }
 
 /// Why a try failed: worth another try, or not (the file is not there at all,
-/// the download limit, an expired sign-in).
+/// the download limit, an expired sign-in), or the storage is switched off.
 enum Miss {
     Retry(String),
     Fatal(String),
+    Backup,
 }
 
 /// One file into its `.part`, checked against its SHA-256. Moving it into
-/// place is `fetch_all`'s, once every file is here.
+/// place is `place_all`'s, once every file is here.
 async fn fetch_one(
     ctx: &Ctx,
     client: &reqwest::Client,
@@ -968,9 +1081,14 @@ async fn fetch_one(
     // read them again.
     let mut hashed: Option<(u64, Sha256)> = None;
     let mut retries = 0u32;
+    // Tries in a row that brought nothing from the storage.
+    let mut empty_tries = 0u32;
     loop {
         if ctx.stopped() {
             return Err(Stop::Paused);
+        }
+        if progress.turning_to_backup() {
+            return Err(Stop::Backup);
         }
         let mut have = file_len(&part);
         if have > job.size {
@@ -986,9 +1104,23 @@ async fn fetch_one(
 
         if have < job.size {
             let outcome = match link(client, source, job).await {
-                Ok(url) => stream_into(ctx, client, &url, &name, &part, job.size, &mut have, &mut hasher, progress, &mut counted).await,
+                Ok(url) => {
+                    let before = have;
+                    let result =
+                        stream_into(ctx, client, &url, &name, source.stall(), &part, job.size, &mut have, &mut hasher, progress, &mut counted).await;
+                    // Only the storage's own failures count, not the website's.
+                    empty_tries = if have > before || ctx.stopped() { 0 } else { empty_tries + 1 };
+                    result
+                }
                 Err(miss) => Err(miss),
             };
+            if progress.fallback && (matches!(outcome, Err(Miss::Backup)) || empty_tries >= STORAGE_TRIES) {
+                progress.to_backup.store(true, Ordering::SeqCst);
+                return Err(Stop::Backup);
+            }
+            if progress.turning_to_backup() {
+                return Err(Stop::Backup);
+            }
             match outcome {
                 Ok(()) if have == job.size => {}
                 Ok(()) if ctx.stopped() => return Err(Stop::Paused),
@@ -1000,6 +1132,9 @@ async fn fetch_one(
                     continue;
                 }
                 Err(Miss::Fatal(why)) => return Err(Stop::Failed(why)),
+                Err(Miss::Backup) => {
+                    return Err(Stop::Failed("Game downloads are not open yet. Try again later -- your progress is kept.".into()))
+                }
                 Err(Miss::Retry(why)) => {
                     if ctx.stopped() {
                         return Err(Stop::Paused);
@@ -1040,6 +1175,7 @@ async fn stream_into(
     client: &reqwest::Client,
     url: &str,
     name: &str,
+    stall: Duration,
     part: &Path,
     size: u64,
     have: &mut u64,
@@ -1081,10 +1217,10 @@ async fn stream_into(
     let mut stream = resp.bytes_stream();
     let mut last_flush = Instant::now();
     loop {
-        if ctx.stopped() {
+        if ctx.stopped() || progress.turning_to_backup() {
             break;
         }
-        let next = tokio::time::timeout(STALL_TIMEOUT, stream.next())
+        let next = tokio::time::timeout(stall, stream.next())
             .await
             .map_err(|_| Miss::Retry("the connection stalled".into()))?;
         let Some(chunk) = next else { break };
@@ -1157,9 +1293,322 @@ async fn backoff(ctx: &Ctx, retries: &mut u32, why: String) -> bool {
         if ctx.stopped() {
             return true;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(TICK).await;
     }
     true
+}
+
+// ----------------------------------------------------------------- backup ---
+
+/// What the storage did not bring, from the backup archive, into each file's
+/// `.part`. Up to `single_files` bytes still missing, one file at a time from
+/// inside the archive; more, the whole archive, unpacked here. Every file is
+/// checked against the list before it counts.
+async fn from_backup(
+    ctx: &Ctx,
+    client: &reqwest::Client,
+    backup: &Backup,
+    temp: &Path,
+    jobs: &[GameFile],
+    single_files: u64,
+) -> std::result::Result<(), Stop> {
+    std::fs::create_dir_all(temp)?;
+    // A part the storage finished was checked as it arrived; a whole one is
+    // checked again here all the same (the switch can cut in between).
+    let mut left = Vec::new();
+    for job in jobs {
+        let part = part_path(temp, job);
+        let whole = file_len(&part) == job.size && hex(&hash_prefix(&part, job.size).await?.finalize()) == job.sha256;
+        if !whole {
+            left.push(job.clone());
+        }
+    }
+    if left.is_empty() {
+        return Ok(());
+    }
+    let missing: u64 = left.iter().map(|j| j.size).sum();
+    if missing <= single_files {
+        // The bar now counts only what is left.
+        let source = Source::Archive { url: backup.url.clone(), folder: backup.folder.clone() };
+        let have: u64 = left.iter().map(|j| file_len(&part_path(temp, j)).min(j.size)).sum();
+        return fetch_parts(ctx, client, &source, temp, &left, have, false).await;
+    }
+
+    let archive = temp.join(ARCHIVE_PART);
+    let needed = backup.size.saturating_sub(file_len(&archive)) + missing + SPACE_MARGIN;
+    if let Some(free) = free_space(temp) {
+        if free < needed {
+            return Err(Stop::Failed(format!(
+                "Not enough space on that drive: {} free, about {} needed. Free some space and press Continue -- your progress is kept.",
+                gb(free),
+                gb(needed)
+            )));
+        }
+    }
+    download_archive(ctx, client, &backup.url, backup.size, &archive).await?;
+    let out = temp.join(UNPACK_DIR);
+    unpack(ctx, &archive, &backup.folder, &left, &out).await?;
+
+    // Unpacked: each file checked, then it is that file's part.
+    for job in &left {
+        let unpacked = target_path(&out.join(backup.folder.trim_end_matches('/')), job);
+        let right = file_len(&unpacked) == job.size && hex(&hash_prefix(&unpacked, job.size).await?.finalize()) == job.sha256;
+        if !right {
+            let _ = std::fs::remove_dir_all(&out);
+            return Err(Stop::Failed(format!(
+                "{} could not be prepared. Press Continue to try again -- your progress is kept.",
+                job.path
+            )));
+        }
+        std::fs::rename(&unpacked, part_path(temp, job))?;
+    }
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_file(&archive);
+    Ok(())
+}
+
+/// The whole backup archive into `archive`, resumed where it stopped. One
+/// connection (archive.org gives one fast stream), retried like any file.
+async fn download_archive(ctx: &Ctx, client: &reqwest::Client, url: &str, size: u64, archive: &Path) -> std::result::Result<(), Stop> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let mut retries = 0u32;
+    let mut meter = Meter::new();
+    loop {
+        if ctx.stopped() {
+            return Err(Stop::Paused);
+        }
+        let mut have = file_len(archive);
+        if have > size {
+            std::fs::remove_file(archive)?;
+            have = 0;
+        }
+        if have == size {
+            return Ok(());
+        }
+        ctx.set(|s| {
+            s.phase = Phase::Downloading;
+            s.done = have;
+            s.total = size;
+            if retries == 0 {
+                s.message = if have > 0 { "Resuming...".into() } else { "Downloading...".into() };
+            }
+        });
+        ctx.emit();
+
+        let attempt: std::result::Result<(), String> = async {
+            let resp = client.get(url).header(reqwest::header::RANGE, format!("bytes={have}-")).send().await.map_err(|e| e.to_string())?;
+            let status = resp.status();
+            let mut file = if status == reqwest::StatusCode::PARTIAL_CONTENT {
+                tokio::fs::OpenOptions::new().create(true).append(true).open(archive).await.map_err(|e| e.to_string())?
+            } else if status.is_success() {
+                // The server ignored the range: start over rather than append
+                // a second copy of the beginning.
+                have = 0;
+                tokio::fs::File::create(archive).await.map_err(|e| e.to_string())?
+            } else {
+                return Err(format!("the server answered {status}"));
+            };
+            let mut stream = resp.bytes_stream();
+            let mut last_emit = Instant::now();
+            let mut last_flush = Instant::now();
+            loop {
+                if ctx.stopped() {
+                    break;
+                }
+                let next = tokio::time::timeout(STALL_TIMEOUT, stream.next()).await.map_err(|_| "the connection stalled".to_string())?;
+                let Some(chunk) = next else { break };
+                let chunk = chunk.map_err(|e| e.to_string())?;
+                file.write_all(&chunk).await.map_err(|e| format!("writing to disk failed: {e}"))?;
+                have += chunk.len() as u64;
+                meter.add(chunk.len() as u64);
+                if last_flush.elapsed() > Duration::from_secs(5) {
+                    file.flush().await.map_err(|e| e.to_string())?;
+                    last_flush = Instant::now();
+                }
+                if last_emit.elapsed() >= EMIT_EVERY {
+                    last_emit = Instant::now();
+                    let speed = meter.rate();
+                    ctx.set(|s| {
+                        s.done = have;
+                        s.speed = speed;
+                        s.eta_secs = eta(size.saturating_sub(have), speed);
+                        s.message.clear();
+                    });
+                    ctx.emit();
+                }
+            }
+            file.flush().await.map_err(|e| e.to_string())?;
+            Ok(())
+        }
+        .await;
+
+        match attempt {
+            Ok(()) if ctx.stopped() => return Err(Stop::Paused),
+            Ok(()) if file_len(archive) == size => return Ok(()),
+            Ok(()) => {
+                if !backoff(ctx, &mut retries, "the connection closed early".into()).await {
+                    return Err(Stop::Failed(retry_exhausted()));
+                }
+            }
+            Err(why) => {
+                if !backoff(ctx, &mut retries, why).await {
+                    return Err(Stop::Failed(retry_exhausted()));
+                }
+            }
+        }
+        meter = Meter::new();
+    }
+}
+
+/// 7-Zip's standalone extractor, compiled into the launcher (build.rs,
+/// resources/README.md); it only runs for the backup.
+#[cfg(has_7zr)]
+const SEVEN_ZIP: &[u8] = include_bytes!("../resources/7zr.exe");
+#[cfg(not(has_7zr))]
+const SEVEN_ZIP: &[u8] = &[];
+
+/// The 7-Zip to unpack with: the one inside the launcher (written once to the
+/// config dir), else an installed 7-Zip.
+fn seven_zip(config_dir: &Path) -> Option<PathBuf> {
+    if !SEVEN_ZIP.is_empty() {
+        let path = config_dir.join("tools").join("7zr.exe");
+        if std::fs::read(&path).is_ok_and(|b| b == SEVEN_ZIP) {
+            return Some(path);
+        }
+        if std::fs::create_dir_all(path.parent()?).is_ok() && std::fs::write(&path, SEVEN_ZIP).is_ok() {
+            return Some(path);
+        }
+    }
+    for base in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
+        if let Ok(dir) = std::env::var(base) {
+            let exe = Path::new(&dir).join("7-Zip").join("7z.exe");
+            if exe.is_file() {
+                return Some(exe);
+            }
+        }
+    }
+    None
+}
+
+fn command(exe: &Path) -> std::process::Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut command = std::process::Command::new(exe);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
+/// Only `jobs`' files out of the archive, into `out` (under `folder`, as in
+/// the archive). The list of names goes through a file: hundreds of paths do
+/// not fit on a command line.
+async fn unpack(ctx: &Ctx, archive: &Path, folder: &str, jobs: &[GameFile], out: &Path) -> std::result::Result<(), Stop> {
+    let exe = seven_zip(&ctx.config_dir).ok_or_else(|| {
+        Stop::Failed("The game's files could not be prepared: 7-Zip is missing. Install 7-Zip from 7-zip.org and press Continue -- your progress is kept.".into())
+    })?;
+    let total: u64 = jobs.iter().map(|j| j.size).sum();
+    ctx.set(|s| {
+        s.phase = Phase::Preparing;
+        s.done = 0;
+        s.total = total;
+        s.speed = 0.0;
+        s.eta_secs = None;
+        s.message = "Preparing files...".into();
+    });
+    ctx.emit();
+
+    let list = archive.with_file_name("unpack.txt");
+    let names: String = jobs.iter().map(|j| format!("{folder}{}\n", j.path)).collect();
+    std::fs::write(&list, names)?;
+    let _ = std::fs::remove_dir_all(out);
+
+    let status = ctx.status.clone();
+    let stop = ctx.stop.clone();
+    let tell = ctx.tell.clone();
+    let dir = ctx.dir.clone();
+    let (archive, out_dir, list_file) = (archive.to_path_buf(), out.to_path_buf(), list.clone());
+    let result = tokio::task::spawn_blocking(move || -> std::result::Result<bool, String> {
+        use std::io::Read as _;
+        // -bsp1: progress to stdout; -bso0: no file list; -aoa: overwrite, so
+        // a second try after a pause just redoes it; -scsUTF-8: the list's
+        // names are UTF-8.
+        let mut child = command(&exe)
+            .arg("x")
+            .arg(&archive)
+            .arg(format!("-o{}", out_dir.display()))
+            .args(["-y", "-aoa", "-bso0", "-bsp1", "-bse2", "-scsUTF-8"])
+            .arg(format!("@{}", list_file.display()))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("could not start 7-Zip: {e}"))?;
+        let mut stdout = child.stdout.take().ok_or("7-Zip gave no output")?;
+        let mut buf = [0u8; 4096];
+        let mut pending = String::new();
+        let mut last = Instant::now();
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(false);
+            }
+            let n = stdout.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            pending.push_str(&String::from_utf8_lossy(&buf[..n]));
+            // 7-Zip redraws its progress line with backspaces and CRs: "42% 17".
+            let pct = pending
+                .split(['\r', '\n', '\u{8}'])
+                .filter_map(|piece| piece.trim().split('%').next().filter(|_| piece.contains('%')).and_then(|p| p.trim().parse::<u64>().ok()))
+                .rfind(|p| *p <= 100);
+            if let Some(cut) = pending.rfind(['\r', '\n', '\u{8}']) {
+                pending = pending[cut + 1..].to_string();
+            }
+            if let (Some(pct), true) = (pct, last.elapsed() >= EMIT_EVERY) {
+                last = Instant::now();
+                let snapshot = {
+                    let mut st = status.lock().expect("download status");
+                    st.done = st.total * pct / 100;
+                    st.message = format!("Preparing files... {pct}%");
+                    st.clone()
+                };
+                tell(Event::Status(Status { free_bytes: free_space(&dir), ..snapshot }));
+            }
+        }
+        let mut err = String::new();
+        if let Some(mut e) = child.stderr.take() {
+            let _ = e.read_to_string(&mut err);
+        }
+        let code = child.wait().map_err(|e| e.to_string())?;
+        if !code.success() {
+            let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+            return Err(format!("7-Zip failed (exit {}): {first}", code.code().unwrap_or(-1)));
+        }
+        Ok(true)
+    })
+    .await
+    .map_err(|e| Stop::Failed(e.to_string()))?;
+    let _ = std::fs::remove_file(&list);
+    match result {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Stop::Paused),
+        Err(why) => {
+            // A damaged archive is downloaded again next time.
+            let _ = std::fs::remove_file(archive_of(out));
+            Err(Stop::Failed(format!("The game's files could not be prepared ({why}). Press Continue to try again.")))
+        }
+    }
+}
+
+/// The archive next to an unpack folder (both in the temp folder).
+fn archive_of(out: &Path) -> PathBuf {
+    out.with_file_name(ARCHIVE_PART)
 }
 
 /// Where the game already is in `dir` (or a few folders below it), for the
@@ -1355,7 +1804,7 @@ mod tests {
     }
 
     fn list(files: Vec<GameFile>) -> GameList {
-        GameList { files }
+        GameList { files, backup: None }
     }
 
     #[test]
@@ -1483,6 +1932,141 @@ mod tests {
         format!("http://{addr}/game/")
     }
 
+    /// The storage's whole run, as `run` does it: the parts, then into place.
+    async fn fetch_all(ctx: &Ctx, client: &reqwest::Client, source: &Source, root: &Path, temp: &Path, jobs: &[GameFile], have: u64) -> std::result::Result<(), Stop> {
+        fetch_parts(ctx, client, source, temp, jobs, have, false).await?;
+        place_all(ctx, root, temp, jobs)
+    }
+
+    /// A server for the backup tests: each path its body, with or without
+    /// `Range` (archive.org answers a file inside an archive whole, and the
+    /// archive itself in ranges); any other path answers `status`.
+    async fn serve_paths(routes: Vec<(String, Vec<u8>, bool)>, status: u16) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let routes = routes.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16384];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let Some((_, body, ranges)) = routes.iter().find(|(p, _, _)| *p == path) else {
+                        let head = format!("HTTP/1.1 {status} Nope\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        let _ = sock.write_all(head.as_bytes()).await;
+                        return;
+                    };
+                    let from: usize = req
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=").map(|r| r.trim_end_matches('-').to_string()))
+                        .and_then(|r| r.parse().ok())
+                        .filter(|_| *ranges)
+                        .unwrap_or(0);
+                    let head = if *ranges && from > 0 {
+                        format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {from}-{}/{}\r\nConnection: close\r\n\r\n", body.len() - from, body.len() - 1, body.len())
+                    } else {
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
+                    };
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(&body[from..]).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn a_storage_that_cannot_serve_turns_to_the_backup() {
+        let base = serve_paths(vec![], 503).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let client = http_client().unwrap();
+        let jobs = vec![entry("BravoHotelGame/a.pak", b"aaaa"), entry("BravoHotelGame/b.pak", b"bbbb")];
+        let source = Source::Base(format!("{base}/game/"));
+        let result = fetch_parts(&ctx, &client, &source, &tmp.path().join(TEMP_DIR), &jobs, 0, true).await;
+        assert!(matches!(result, Err(Stop::Backup)));
+    }
+
+    #[tokio::test]
+    async fn the_backup_sends_single_files_whole() {
+        let folder = "Manifest #2065353802481281242/";
+        let bodies = vec![
+            (crate::game::GAME_EXE.to_string(), b"MZ the exe".to_vec()),
+            ("BravoHotelGame/Content/Paks/a b.pak".to_string(), (0..50_000u32).map(|i| (i % 13) as u8).collect::<Vec<u8>>()),
+        ];
+        // Like archive.org: the whole inner path encoded, no ranges.
+        let routes = bodies.iter().map(|(p, b)| (format!("/item/game.7z/{}", encode_all(&format!("{folder}{p}"))), b.clone(), false)).collect();
+        let base = serve_paths(routes, 404).await;
+        let files: Vec<GameFile> = bodies.iter().map(|(p, b)| entry(p, b)).collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let temp = tmp.path().join(TEMP_DIR);
+        // Half of one file came from the storage before it stopped serving.
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(part_path(&temp, &files[1]), &bodies[1].1[..1000]).unwrap();
+        let backup = Backup { url: format!("{base}/item/game.7z"), folder: folder.into(), size: 0, only: false };
+        let client = http_client().unwrap();
+        let result = from_backup(&ctx, &client, &backup, &temp, &files, u64::MAX).await;
+        assert!(result.is_ok(), "{:?}", result.err().map(|e| match e { Stop::Failed(m) => m, _ => "stopped".into() }));
+        place_all(&ctx, tmp.path(), &temp, &files).ok().unwrap();
+        for (path, body) in &bodies {
+            assert_eq!(&std::fs::read(tmp.path().join(path)).unwrap(), body, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_backup_archive_is_downloaded_unpacked_and_checked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let Some(seven) = seven_zip(&ctx.config_dir) else {
+            eprintln!("skipped: no 7-Zip here (resources/7zr.exe or an installed 7-Zip)");
+            return;
+        };
+        // An archive laid out like the real one: the game under one folder,
+        // plus a file the list does not have.
+        let folder = "Manifest #2065353802481281242";
+        let stage = tmp.path().join("stage");
+        let bodies = vec![
+            (crate::game::GAME_EXE.to_string(), b"MZ the exe".to_vec()),
+            ("BravoHotelGame/Content/Paks/pakchunk0-WindowsClient.pak".to_string(), (0..200_000u32).map(|i| (i % 251) as u8).collect::<Vec<u8>>()),
+            ("Engine/Binaries/x.dll".to_string(), b"dll".to_vec()),
+        ];
+        for (path, body) in &bodies {
+            let file = stage.join(folder).join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, body).unwrap();
+        }
+        std::fs::create_dir_all(stage.join(folder).join("BravoHotelGame/Binaries/Win64/BattlEye")).unwrap();
+        std::fs::write(stage.join(folder).join("BravoHotelGame/Binaries/Win64/BattlEye/BEService_x64.exe"), b"not ours").unwrap();
+        let archive = tmp.path().join("game.7z");
+        let made = command(&seven).current_dir(&stage).arg("a").arg(&archive).arg(folder).output().unwrap();
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stdout));
+        let archive_bytes = std::fs::read(&archive).unwrap();
+
+        let base = serve_paths(vec![("/item/game.7z".into(), archive_bytes.clone(), true)], 404).await;
+        let files: Vec<GameFile> = bodies.iter().map(|(p, b)| entry(p, b)).collect();
+        let temp = tmp.path().join("game").join(TEMP_DIR);
+        // One file came whole from the storage already: only the others are unpacked.
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(part_path(&temp, &files[2]), &bodies[2].1).unwrap();
+        // Half of the archive was downloaded by an earlier run.
+        std::fs::write(temp.join(ARCHIVE_PART), &archive_bytes[..archive_bytes.len() / 2]).unwrap();
+        let backup = Backup { url: format!("{base}/item/game.7z"), folder: format!("{folder}/"), size: archive_bytes.len() as u64, only: false };
+        let client = http_client().unwrap();
+        let result = from_backup(&ctx, &client, &backup, &temp, &files, 0).await;
+        assert!(result.is_ok(), "{:?}", result.err().map(|e| match e { Stop::Failed(m) => m, _ => "stopped".into() }));
+        let root = tmp.path().join("game");
+        place_all(&ctx, &root, &temp, &files).ok().unwrap();
+        for (path, body) in &bodies {
+            assert_eq!(&std::fs::read(root.join(path)).unwrap(), body, "{path}");
+        }
+        assert!(!temp.join(ARCHIVE_PART).exists(), "the archive is deleted once unpacked");
+        assert!(!root.join("BravoHotelGame/Binaries/Win64/BattlEye").exists(), "only the list's files are unpacked");
+    }
+
     fn test_ctx(dir: &Path) -> Ctx {
         Ctx {
             tell: Arc::new(|_| {}),
@@ -1517,6 +2101,7 @@ mod tests {
         assert!(result.is_ok(), "{:?}", result.err().map(|e| match e {
             Stop::Failed(m) => m,
             Stop::Paused => "paused".into(),
+            Stop::Backup => "backup".into(),
         }));
         for (path, body) in &bodies {
             assert_eq!(&std::fs::read(tmp.path().join(path)).unwrap(), body, "{path}");

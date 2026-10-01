@@ -9,3 +9,4 @@
 # Binaries embedded at build time (see resources/README.md) -- build artifacts, not source
 /resources/XAPOFX1_5.dll
 /resources/7za.exe
+/resources/7zr.exe
