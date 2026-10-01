@@ -1,7 +1,7 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { News } from "./News";
 import { LaunchArgs } from "./LaunchArgs";
-import type { NewsItem, Phase } from "../types";
+import type { GameFiles, NewsItem, Phase } from "../types";
 
 const DISCORD_URL = "https://discord.gg/superpeopleofficial";
 
@@ -12,12 +12,23 @@ interface Props {
   busy: boolean;
   /** The Terms of Service are not accepted yet: Play opens them instead. */
   locked: boolean;
+  /** Play's check of the game's files: not ok, and Play is Verify files. */
+  files: GameFiles | null;
+  onVerify: () => void;
   onUnlock: () => void;
   onLaunchArgs: (next: string) => void;
   onPrimary: () => void;
   onLaunch: () => void;
   onStop: () => void;
   onError: (message: string) => void;
+}
+
+/** The line under Verify files: what is wrong, in a few words. */
+function filesNote(files: GameFiles): string {
+  const damaged = files.missing + files.changed;
+  if (damaged > 0) return damaged === 1 ? "1 file does not match" : `${damaged} files do not match`;
+  if (files.extra.length > 0) return files.extra.length === 1 ? "1 extra file found" : `${files.extra.length} extra files found`;
+  return "Check the files once";
 }
 
 export function PlayPanel(props: Props) {
@@ -64,6 +75,21 @@ export function PlayPanel(props: Props) {
                 <span className="cta__icon">
                   <svg viewBox="0 0 14 14" fill="currentColor">
                     <path fillRule="evenodd" d="M4.5 6V4.5a2.5 2.5 0 0 1 5 0V6h.75c.41 0 .75.34.75.75v5.5c0 .41-.34.75-.75.75h-6.5a.75.75 0 0 1-.75-.75v-5.5c0-.41.34-.75.75-.75zm1.25 0h2.5V4.5a1.25 1.25 0 0 0-2.5 0z" />
+                  </svg>
+                </span>
+              </span>
+            </button>
+          ) : props.files && !props.files.ok ? (
+            <button className="cta cta--locked" type="button" title={props.files.message} onClick={props.onVerify}>
+              <span className="cta__inner">
+                <span className="cta__stack">
+                  <span className="cta__label">Verify files</span>
+                  <span className="cta__note">{filesNote(props.files)}</span>
+                </span>
+                <span className="cta__icon">
+                  <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6">
+                    <path d="M7 1.5l4.5 1.75v3.5c0 2.6-1.9 4.75-4.5 5.75-2.6-1-4.5-3.15-4.5-5.75v-3.5z" />
+                    <path d="M4.75 7l1.5 1.5 3-3" />
                   </svg>
                 </span>
               </span>

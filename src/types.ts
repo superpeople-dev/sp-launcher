@@ -36,6 +36,18 @@ export interface InstallState {
   exe_path: string | null;
 }
 
+/** Mirrors lib.rs `GameFiles`: Play's check of the game's files (integrity.rs). */
+export interface GameFiles {
+  ok: boolean;
+  /** Why Play is refused, for the player. */
+  message: string;
+  missing: number;
+  changed: number;
+  unchecked: number;
+  /** Paks and DLLs that are not part of the game. */
+  extra: string[];
+}
+
 /** Mirrors `auth::Terms`: what Play needs accepted, from the website. */
 export interface Terms {
   /** The legal pages' date, YYYY-MM-DD. */

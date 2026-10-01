@@ -17,7 +17,7 @@ import { CompletedPanel } from "./components/community/CompletedPanel";
 import { activeNews } from "./news";
 import { checkForUpdate, installUpdate } from "./lib/updater";
 import { clearCommunityCache, preloadBoards } from "./lib/community";
-import type { AuthState, Config, HostsStatus, InstallState, NewsItem, Phase, Profile, Tab, Terms } from "./types";
+import type { AuthState, Config, GameFiles, HostsStatus, InstallState, NewsItem, Phase, Profile, Tab, Terms } from "./types";
 
 // Re-check which items are in their [starts_at, ends_at) window every so
 // often, so an event that just started (or just ended) updates without the
@@ -49,6 +49,9 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("play");
   const [config, setConfig] = useState<Config | null>(null);
   const [install, setInstall] = useState<InstallState>({ installed: false, exe_path: null });
+  // Play's check of the game's files (integrity.rs): not ok, and the button is
+  // Verify files. Unknown (null) until the website answered; Play checks again.
+  const [files, setFiles] = useState<GameFiles | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hosts, setHosts] = useState<HostsStatus | null>(null);
@@ -299,6 +302,27 @@ export default function App() {
     resumeDownload();
   }, [profileId, resumeDownload]);
 
+  // Play's check of the game's files, so the button already says Verify files
+  // when they do not match; again whenever the install or its folder changes.
+  const installDir = config?.install_dir;
+  useEffect(() => {
+    if (!profileId || !install.installed || !installDir) {
+      setFiles(null);
+      return;
+    }
+    let gone = false;
+    void invoke<GameFiles>("check_game_files")
+      .then((f) => {
+        if (!gone) setFiles(f);
+      })
+      .catch(() => {
+        if (!gone) setFiles(null);
+      });
+    return () => {
+      gone = true;
+    };
+  }, [profileId, install.installed, installDir]);
+
   useEffect(() => {
     const unlisten: Promise<() => void>[] = [
       // The game exited: re-read the hosts state (the entries stay in place).
@@ -319,6 +343,9 @@ export default function App() {
       // Play found the terms not accepted (they changed since the launcher
       // last asked): show the current ones.
       listen("terms:required", () => loadTerms(true)),
+      // Play found files that are not the official ones: the button becomes
+      // Verify files.
+      listen<GameFiles>("files:changed", (e) => setFiles(e.payload)),
     ];
     return () => {
       unlisten.forEach((p) => void p.then((off) => off()));
@@ -353,8 +380,19 @@ export default function App() {
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
     void invoke<Config>("get_config").then(setConfig);
     void invoke<InstallState>("install_state").then(setInstall);
+    void invoke<GameFiles>("check_game_files").then(setFiles).catch(() => setFiles(null));
     setNotice("The game is installed and ready to play.");
   }, []);
+
+  // The files do not match (Play's check): Verify files, on the Download tab,
+  // which repairs them and moves the extra ones out of the game's way.
+  const onVerifyFiles = useCallback(() => {
+    if (!config) return;
+    setError(null);
+    void invoke("download_start", { dir: config.install_dir, verify: true })
+      .then(() => setTab("download"))
+      .catch((e) => setError(String(e)));
+  }, [config]);
 
   // Uninstall deleted the game; the Game folder setting is unchanged.
   const onUninstalled = useCallback(() => {
@@ -474,6 +512,8 @@ export default function App() {
             launchArgs={config.launch_args}
             busy={busy}
             locked={!termsAccepted}
+            files={files}
+            onVerify={onVerifyFiles}
             onUnlock={() => (terms ? setTermsOpen(true) : loadTerms(true))}
             onLaunchArgs={(launch_args) => patchConfig({ launch_args })}
             onPrimary={onPrimary}

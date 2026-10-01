@@ -55,6 +55,16 @@ Rust backend. Windows only.
   (`src-tauri/startup/`); the Download tab leaves them out, so a repair never
   brings the old ones back
   (`src-tauri/src/startup_images.rs`).
+- **Official game files only.** Play first checks the Game folder against the
+  website's file list: every file there, with the size and last-write time it
+  had when the launcher last checked its SHA-256 (a download or Verify files
+  records each file it hashes, `game-files.v1.json`), and no extra paks in
+  `Content/Paks` or DLLs next to the game's exe besides the launcher's own. When
+  something does not match, Play refuses with what it found and the button
+  becomes Verify files, which repairs the files and moves the extra ones to
+  `.sp-removed` in the game folder (`src-tauri/src/integrity.rs`). A game the
+  launcher never hashed (installs from before this check) needs one Verify
+  files.
 - **Engine.ini patch.** Before each launch, `n.VerifyPeer=False` and related
   settings are applied (`src-tauri/src/engine_ini.rs`).
 - **Starts the real game exe.** The launcher starts

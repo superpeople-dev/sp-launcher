@@ -39,6 +39,10 @@
 //! Verify files remembers the files it found fine (`Saved::fine`: size, time
 //! and expected SHA-256), so a run that stopped carries on from there.
 //!
+//! Every file a run hashes and finds to be the official one (downloaded, or
+//! found fine by Verify files) is also remembered for Play (integrity.rs), and
+//! Verify files moves extra paks and DLLs out of the game's way.
+//!
 //! Updating the launcher in the middle of a download or Verify files pauses
 //! it first (`pause_for_update`, files closed), and the updated launcher
 //! continues it by itself once the player is signed in (`take_resume`).
@@ -90,6 +94,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::error::{LauncherError, Result};
+use crate::integrity;
 
 // ----------------------------------------------------------------- source ---
 
@@ -675,17 +680,35 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
     // completed where it is; otherwise it goes straight into the folder.
     let root = find_install_root(&ctx.dir).unwrap_or_else(|| ctx.dir.clone());
     let mut jobs = missing(&root, &list.files);
+    // Verify files: paks and DLLs that are not part of the game go out of its
+    // way first (integrity.rs), so Play accepts the folder afterwards.
+    let moved = if verify {
+        integrity::move_extras(&root, &official(&list))
+            .map_err(|e| Stop::Failed(format!("Could not move the files that are not part of the game ({e}). Close the game and try again.")))?
+    } else {
+        Vec::new()
+    };
+    let moved_note = match moved.len() {
+        0 => String::new(),
+        1 => format!(" 1 file that is not part of the game was moved to {} in the game folder.", integrity::REMOVED_DIR),
+        n => format!(" {n} files that are not part of the game were moved to {} in the game folder.", integrity::REMOVED_DIR),
+    };
     if verify {
         let damaged = damaged(ctx, &root, &list.files, &jobs, &mut saved).await?;
+        // The files read and found fine: Play trusts them while they stay so.
+        let fine = saved.fine.iter().map(|f| integrity::Checked { path: f.path.clone(), size: f.size, modified: f.modified, sha256: f.sha256.clone() });
+        if let Err(e) = integrity::remember(&ctx.config_dir, &root, fine) {
+            eprintln!("[integrity] {e}");
+        }
         jobs.extend(damaged);
         jobs.sort_by_key(|f| (is_exe(f), std::cmp::Reverse(f.size)));
     }
     if jobs.is_empty() {
         if verify {
-            (ctx.tell)(Event::Report(serde_json::json!({ "action": "verify.ok", "files": list.files.len() })));
+            (ctx.tell)(Event::Report(serde_json::json!({ "action": "verify.ok", "files": list.files.len(), "moved": moved.len() })));
         }
         let message = if verify {
-            format!("All {} files are fine: nothing to download.", list.files.len())
+            format!("All {} files are fine: nothing to download.{moved_note}", list.files.len())
         } else {
             "The game is already in this folder: nothing to download.".to_string()
         };
@@ -757,13 +780,18 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
         Err(stop) => return Err(stop),
     };
     place_all(ctx, &root, &temp, &jobs)?;
+    // Each was hashed as it arrived and placed only if it matched the list.
+    let placed = jobs.iter().filter_map(|j| integrity::checked(&root, &j.path, &j.sha256));
+    if let Err(e) = integrity::remember(&ctx.config_dir, &root, placed) {
+        eprintln!("[integrity] {e}");
+    }
     // Both speeds of the race (bytes per second), when there was one.
     let speeds = race.as_ref().and_then(|r| {
         let storage = (*r.storage_speed.lock().expect("race"))?;
         Some(serde_json::json!({ "storage": storage.round(), "backup": r.backup_speed.min(1e12).round() }))
     });
     (ctx.tell)(Event::Report(if verify {
-        serde_json::json!({ "action": "verify.repaired", "files": jobs.len(), "bytes": total, "source": from, "speeds": speeds })
+        serde_json::json!({ "action": "verify.repaired", "files": jobs.len(), "bytes": total, "source": from, "speeds": speeds, "moved": moved.len() })
     } else {
         // How long it took, when this run did the whole download.
         let seconds = (have == 0).then(|| started.elapsed().as_secs());
@@ -773,8 +801,8 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
     // ---- done ----------------------------------------------------------
     let message = if verify {
         match jobs.len() {
-            1 => "Repaired: 1 missing or damaged file was downloaded again.".to_string(),
-            n => format!("Repaired: {n} missing or damaged files were downloaded again."),
+            1 => format!("Repaired: 1 missing or damaged file was downloaded again.{moved_note}"),
+            n => format!("Repaired: {n} missing or damaged files were downloaded again.{moved_note}"),
         }
     } else {
         format!("Installed. All {} files were checked.", list.files.len())
@@ -921,6 +949,19 @@ fn http_client() -> Result<reqwest::Client> {
         .user_agent(concat!("SP-Launcher/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(20))
         .build()?)
+}
+
+/// The list as integrity.rs compares the folder with it.
+fn official(list: &GameList) -> Vec<integrity::Official> {
+    list.files.iter().map(|f| integrity::Official { path: f.path.clone(), size: f.size, sha256: f.sha256.clone() }).collect()
+}
+
+/// The game's files, as Play checks them (integrity.rs): the website's list,
+/// without the launcher's own startup pictures.
+pub async fn official_files() -> Result<Vec<integrity::Official>> {
+    let mut list = fetch_list(&http_client()?).await?;
+    list.files.retain(|f| !crate::startup_images::is_ours(&f.path));
+    Ok(official(&list))
 }
 
 async fn fetch_list(client: &reqwest::Client) -> Result<GameList> {

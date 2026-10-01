@@ -10,6 +10,7 @@ mod engine_ini;
 mod error;
 mod game;
 mod hardware;
+mod integrity;
 mod pcid;
 mod shim;
 mod startup_images;
@@ -143,6 +144,41 @@ fn set_config(state: State<'_, AppState>, cfg: Config) -> Result<()> {
 fn install_state(state: State<'_, AppState>) -> game::InstallState {
     let dir = state.config.lock().expect("config mutex").install_dir.clone();
     game::detect(&dir)
+}
+
+/// Play's check of the game's files (integrity.rs), for the UI.
+#[derive(Serialize, Clone)]
+struct GameFiles {
+    ok: bool,
+    message: String,
+    missing: usize,
+    changed: usize,
+    unchecked: usize,
+    extra: Vec<String>,
+}
+
+impl From<integrity::Report> for GameFiles {
+    fn from(r: integrity::Report) -> Self {
+        GameFiles { ok: r.ok(), message: r.message(), missing: r.missing.len(), changed: r.changed.len(), unchecked: r.unchecked, extra: r.extra }
+    }
+}
+
+/// The Game folder against the website's list and what the launcher checked.
+async fn game_files(state: &AppState) -> Result<integrity::Report> {
+    let dir = state.config.lock().expect("config mutex").install_dir.trim().to_string();
+    let config_dir = state.config_dir.clone();
+    let official = download::official_files()
+        .await
+        .map_err(|e| LauncherError::Message(format!("Could not check the game's files against superpeople.dev: {e}")))?;
+    tauri::async_runtime::spawn_blocking(move || integrity::check(&config_dir, std::path::Path::new(&dir), &official))
+        .await
+        .map_err(|e| LauncherError::Message(e.to_string()))
+}
+
+/// What the Play button shows: Play, or Verify files when the files do not match.
+#[tauri::command]
+async fn check_game_files(state: State<'_, AppState>) -> Result<GameFiles> {
+    Ok(game_files(&state).await?.into())
 }
 
 #[tauri::command]
@@ -575,6 +611,14 @@ async fn launch_game(
     if !terms.accepted {
         return Err(terms_first(&app, LauncherError::TermsRequired));
     }
+    // The game's files are the official ones (integrity.rs): otherwise no Play,
+    // and the button becomes Verify files.
+    let files = game_files(&state).await?;
+    if !files.ok() {
+        let message = files.message();
+        let _ = app.emit("files:changed", GameFiles::from(files));
+        return Err(LauncherError::Message(message));
+    }
     {
         let device_id = ensure_device_id(&state)?;
         // This PC's one-way code (pcid.rs), so a ban follows the PC. Read
@@ -982,6 +1026,7 @@ pub fn run() {
             get_config,
             set_config,
             install_state,
+            check_game_files,
             open_install_dir,
             fetch_news,
             hosts_status,
