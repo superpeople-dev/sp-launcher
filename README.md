@@ -49,8 +49,9 @@ Rust backend. Windows only.
   written into the game's `Win64` folder, so the client does not wait for Steam
   (`src-tauri/src/shim.rs`, `src-tauri/resources/README.md`).
 - **Community startup pictures.** Before each launch and after each download,
-  the game's `Splash.bmp` is the community's own (`src-tauri/startup/`); the
-  Download tab leaves it out, so a repair never brings the old one back
+  the game's `Splash.bmp` and `EarlyStartupScreen.bmp` are the community's own
+  (`src-tauri/startup/`); the Download tab leaves them out, so a repair never
+  brings the old ones back
   (`src-tauri/src/startup_images.rs`).
 - **Engine.ini patch.** Before each launch, `n.VerifyPeer=False` and related
   settings are applied (`src-tauri/src/engine_ini.rs`).
