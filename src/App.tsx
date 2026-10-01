@@ -257,20 +257,47 @@ export default function App() {
     };
   }, [runUpdateCheck]);
 
-  const runUpdateInstall = useCallback(() => {
+  // The download or Verify files a launcher update interrupted continues
+  // where it stopped (download.rs pause_for_update), on the Download tab.
+  const resumeDownload = useCallback(() => {
+    void invoke<{ dir: string; verify: boolean } | null>("download_take_resume")
+      .then((run) => {
+        if (!run) return;
+        setTab("download");
+        return invoke("download_start", { dir: run.dir, verify: run.verify });
+      })
+      .catch((e) => setError(String(e)));
+  }, []);
+
+  const runUpdateInstall = useCallback(async () => {
     if (!update) return;
     installingRef.current = true;
     setInstallingUpdate(true);
     setUpdateProgress(null);
-    void installUpdate(update, (done, total) => setUpdateProgress({ done, total })).catch((e) => {
+    // A running download or Verify files first stops where it is, its files
+    // closed; the updated launcher continues it.
+    const paused = await invoke<boolean>("download_pause_for_update").catch(() => false);
+    try {
+      await installUpdate(update, (done, total) => setUpdateProgress({ done, total }));
+    } catch (e) {
       // A successful run typically exits the process itself (see
       // lib/updater.ts) before this ever runs — only a genuine failure
-      // reaches here.
+      // reaches here, and the paused download carries on at once.
       installingRef.current = false;
       setInstallingUpdate(false);
       setError(`Update failed: ${String(e)}`);
-    });
-  }, [update]);
+      if (paused) resumeDownload();
+    }
+  }, [update, resumeDownload]);
+
+  // After a launcher update: the download it paused continues, once the player
+  // is signed in (the website wants the sign-in for each file's link).
+  const resumed = useRef(false);
+  useEffect(() => {
+    if (!profileId || resumed.current) return;
+    resumed.current = true;
+    resumeDownload();
+  }, [profileId, resumeDownload]);
 
   useEffect(() => {
     const unlisten: Promise<() => void>[] = [
