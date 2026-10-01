@@ -30,6 +30,7 @@ const STEP_LABEL: Record<DownloadStatus["phase"], string> = {
   idle: "Ready",
   checking: "Checking",
   downloading: "Downloading",
+  preparing: "Preparing",
   paused: "Paused",
   done: "Installed",
   failed: "Stopped",
@@ -41,7 +42,7 @@ const STEPS: { phase: DownloadStatus["phase"]; name: string }[] = [
   { phase: "downloading", name: "Download and check every file" },
   { phase: "done", name: "Ready to play" },
 ];
-const ORDER: DownloadStatus["phase"][] = ["idle", "checking", "downloading", "done"];
+const ORDER: DownloadStatus["phase"][] = ["idle", "checking", "downloading", "preparing", "done"];
 
 function duration(secs: number | null): string {
   if (secs == null || !Number.isFinite(secs)) return "";
@@ -79,7 +80,7 @@ export function DownloadPanel({ installed, installDir, onFolder, onError, onInst
     if (st && ORDER.includes(st.phase)) setLastActive(st.phase);
   }, [st]);
 
-  const active = st != null && ["checking", "downloading"].includes(st.phase);
+  const active = st != null && ["checking", "downloading", "preparing"].includes(st.phase);
   const resumable = st != null && (st.phase === "paused" || (st.phase === "failed" && st.done > 0));
   // The game already installed: nothing to download, and no Download button.
   const ready = installed && !active && !resumable;

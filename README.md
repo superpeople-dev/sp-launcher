@@ -31,7 +31,11 @@ Rust backend. Windows only.
   shows speed and time left, can pause and continue (also across restarts),
   retries automatically, checks free space, and skips the files a folder
   already has. When it finishes, the game folder is set
-  (`src-tauri/src/download.rs`).
+  (`src-tauri/src/download.rs`). When the storage cannot serve (its limit
+  reached, blocked where the player is), it quietly turns to the backup: the
+  same game as one archive on archive.org, downloaded and unpacked with the
+  bundled 7-Zip (`7zr.exe`), or single files from it for a repair, checked
+  against the same list. The website can send launchers there at once.
 - **Hosts redirect without running as admin.** The launcher runs as a normal
   user. On the first Play it writes one marked block into the Windows hosts
   file that points the game's `bravohotel.io` hostnames at the backend. This
