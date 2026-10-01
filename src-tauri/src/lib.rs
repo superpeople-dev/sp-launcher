@@ -10,6 +10,7 @@ mod engine_ini;
 mod error;
 mod game;
 mod hardware;
+mod pcid;
 mod shim;
 mod startup_images;
 mod gateway;
@@ -576,8 +577,13 @@ async fn launch_game(
     }
     {
         let device_id = ensure_device_id(&state)?;
+        // This PC's one-way code (pcid.rs), so a ban follows the PC. Read
+        // once per run, off the async threads: it asks the firmware and disk.
+        let pc = tauri::async_runtime::spawn_blocking(pcid::codes)
+            .await
+            .unwrap_or_default();
         let pass = auth::game_pass(&session).await.map_err(|e| terms_first(&app, expired(&app, &state, e)))?;
-        let ticket = auth::discord_launch(&pass, &device_id).await?;
+        let ticket = auth::discord_launch(&pass, &device_id, &pc).await?;
         if cfg.debug_logging {
             // The lifetime, never the token. A ticket in a log file is a ticket
             // someone else can use for the next minute.
