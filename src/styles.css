@@ -501,6 +501,21 @@ html, body, #root{
 .cta.is-disabled .cta__label{ color: var(--muted); }
 .cta.is-disabled .cta__icon{ color: var(--muted); }
 
+/* ---- Play before the Terms of Service are accepted: grey, and still a
+   button, because it opens them (TermsDialog.tsx) ---- */
+.cta--locked{ background: #2a2a30; border-top-color: rgba(255,255,255,0.10); }
+.cta--locked:hover{ background: #323238; }
+.cta--locked:active{ background: #222227; }
+.cta--locked .cta__label{ color: var(--paper-dim); }
+.cta--locked .cta__icon{ color: var(--signal-hi); }
+.cta__stack{ display:flex; flex-direction:column; align-items:flex-start; gap:1px; }
+.cta__note{
+  font-family: var(--font);
+  font-size:11px; font-weight:700;
+  letter-spacing:0.1em; text-transform:uppercase;
+  color: var(--muted);
+}
+
 /* ---- "Close Game": same shape as Play, deliberately quieter so it
    doesn't read as a second loud call-to-action while the game is up ---- */
 .cta--stop{ background: var(--surface-3); border-top-color: rgba(255,255,255,0.14); }

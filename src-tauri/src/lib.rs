@@ -422,6 +422,37 @@ async fn auth_refresh(app: AppHandle, state: State<'_, AppState>) -> Result<Opti
     Ok(Some(profile))
 }
 
+// ----------------------------------------------------------------- terms ---
+// Play needs the Terms of Service accepted (auth.rs terms).
+
+/// The current terms, and whether this Discord account accepted them.
+#[tauri::command]
+async fn launcher_terms(app: AppHandle, state: State<'_, AppState>) -> Result<auth::Terms> {
+    let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
+    auth::terms(&session).await.map_err(|e| expired(&app, &state, e))
+}
+
+/// The player read the terms of `version` and accepted them. Answers with the
+/// terms as they are now: accepted, or, if they changed while the player read
+/// them, the new ones to read.
+#[tauri::command]
+async fn accept_terms(app: AppHandle, state: State<'_, AppState>, version: String) -> Result<auth::Terms> {
+    let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
+    match auth::accept_terms(&session, &version).await {
+        Ok(()) | Err(LauncherError::TermsRequired) => {}
+        Err(e) => return Err(expired(&app, &state, e)),
+    }
+    auth::terms(&session).await.map_err(|e| expired(&app, &state, e))
+}
+
+/// Passes an error through; a "terms first" also has the UI open them.
+fn terms_first(app: &AppHandle, error: LauncherError) -> LauncherError {
+    if matches!(error, LauncherError::TermsRequired) {
+        let _ = app.emit("terms:required", ());
+    }
+    error
+}
+
 // ------------------------------------------------------------- community ---
 // The Ideas, Roadmap and Completed pages (community.rs).
 
@@ -536,9 +567,15 @@ async fn launch_game(
     // remembers this launch for the game's own login). See auth.rs.
     let mut env: Vec<(String, String)> = Vec::new();
     let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
+    // The Terms of Service, asked here as well as by the Play button: the
+    // button only knows what the website said when the launcher last asked.
+    let terms = auth::terms(&session).await.map_err(|e| expired(&app, &state, e))?;
+    if !terms.accepted {
+        return Err(terms_first(&app, LauncherError::TermsRequired));
+    }
     {
         let device_id = ensure_device_id(&state)?;
-        let pass = auth::game_pass(&session).await.map_err(|e| expired(&app, &state, e))?;
+        let pass = auth::game_pass(&session).await.map_err(|e| terms_first(&app, expired(&app, &state, e)))?;
         let ticket = auth::discord_launch(&pass, &device_id).await?;
         if cfg.debug_logging {
             // The lifetime, never the token. A ticket in a log file is a ticket
@@ -938,6 +975,8 @@ pub fn run() {
             community_comments_off,
             community_delete_comment,
             auth_refresh,
+            launcher_terms,
+            accept_terms,
             community_vote,
             community_comment,
             community_post_idea,

@@ -10,13 +10,14 @@ import { PlayPanel } from "./components/PlayPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { DownloadPanel } from "./components/DownloadPanel";
 import { Welcome } from "./components/Welcome";
+import { TermsDialog } from "./components/TermsDialog";
 import { IdeasPanel } from "./components/community/IdeasPanel";
 import { RoadmapPanel } from "./components/community/RoadmapPanel";
 import { CompletedPanel } from "./components/community/CompletedPanel";
 import { activeNews } from "./news";
 import { checkForUpdate, installUpdate } from "./lib/updater";
 import { clearCommunityCache, preloadBoards } from "./lib/community";
-import type { AuthState, Config, HostsStatus, InstallState, NewsItem, Phase, Profile, Tab } from "./types";
+import type { AuthState, Config, HostsStatus, InstallState, NewsItem, Phase, Profile, Tab, Terms } from "./types";
 
 // Re-check which items are in their [starts_at, ends_at) window every so
 // often, so an event that just started (or just ended) updates without the
@@ -39,6 +40,12 @@ export default function App() {
   const [profile, setProfile] = useState<Profile | null | undefined>(undefined);
   const [connecting, setConnecting] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+
+  // The Terms of Service, which Play needs accepted (TermsDialog). `null` until
+  // the website has answered: Play stays locked until it says they are.
+  const [terms, setTerms] = useState<Terms | null>(null);
+  const [termsOpen, setTermsOpen] = useState(false);
+  const [termsNote, setTermsNote] = useState<string | null>(null);
 
   const [appVersion, setAppVersion] = useState("");
   const [update, setUpdate] = useState<Update | null>(null);
@@ -119,6 +126,50 @@ export default function App() {
     if (profileId) preloadBoards();
     else clearCommunityCache();
   }, [profileId]);
+
+  // Whether this Discord account accepted the current terms, from the website.
+  // `open` shows them as soon as they are here, unless already accepted.
+  const lastTermsCheck = useRef(0);
+  const loadTerms = useCallback((open = false) => {
+    lastTermsCheck.current = Date.now();
+    void invoke<Terms>("launcher_terms")
+      .then((t) => {
+        setTerms(t);
+        if (open && !t.accepted) setTermsOpen(true);
+      })
+      .catch((e) => {
+        if (open) setError(String(e));
+      });
+  }, []);
+
+  useEffect(() => {
+    if (profileId) {
+      loadTerms();
+    } else {
+      setTerms(null);
+      setTermsOpen(false);
+    }
+  }, [profileId, loadTerms]);
+
+  // Coming back to the launcher asks again (at most once a minute): terms that
+  // changed meanwhile lock Play until they are read.
+  useEffect(() => {
+    if (!profileId) return;
+    let off: (() => void) | undefined;
+    let gone = false;
+    void getCurrentWindow()
+      .onFocusChanged(({ payload: focused }) => {
+        if (focused && Date.now() - lastTermsCheck.current >= 60_000) loadTerms();
+      })
+      .then((unlisten) => {
+        if (gone) unlisten();
+        else off = unlisten;
+      });
+    return () => {
+      gone = true;
+      off?.();
+    };
+  }, [profileId, loadTerms]);
 
   // The launcher opens in front of the other windows. After an update the
   // installer starts it from the background, and Windows would otherwise leave
@@ -210,11 +261,14 @@ export default function App() {
         setError(null);
         setAuthError("Your Discord sign-in has expired. Connect again to continue.");
       }),
+      // Play found the terms not accepted (they changed since the launcher
+      // last asked): show the current ones.
+      listen("terms:required", () => loadTerms(true)),
     ];
     return () => {
       unlisten.forEach((p) => void p.then((off) => off()));
     };
-  }, []);
+  }, [loadTerms]);
 
   const patchConfig = useCallback((patch: Partial<Config>) => {
     setConfig((prev) => {
@@ -364,6 +418,8 @@ export default function App() {
             phase={phase}
             launchArgs={config.launch_args}
             busy={busy}
+            locked={!terms?.accepted}
+            onUnlock={() => (terms ? setTermsOpen(true) : loadTerms(true))}
             onLaunchArgs={(launch_args) => patchConfig({ launch_args })}
             onPrimary={onPrimary}
             onLaunch={onLaunch}
@@ -415,6 +471,29 @@ export default function App() {
           />
         )}
       </main>
+
+      {profile && termsOpen && terms && (
+        <TermsDialog
+          key={terms.version}
+          terms={terms}
+          note={termsNote}
+          onClose={() => {
+            setTermsOpen(false);
+            setTermsNote(null);
+          }}
+          onResult={(fresh) => {
+            setTerms(fresh);
+            if (fresh.accepted) {
+              setTermsOpen(false);
+              setTermsNote(null);
+              setError(null);
+              setNotice("Thanks! You can play now.");
+            } else {
+              setTermsNote("The terms changed while you were reading them. Here is the new version.");
+            }
+          }}
+        />
+      )}
 
       {error && (
         <div className="toast" role="alert" onClick={() => setError(null)}>
