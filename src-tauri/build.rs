@@ -5,6 +5,16 @@ fn main() {
     // still compile, so the include is behind a cfg set here.
     println!("cargo:rustc-check-cfg=cfg(has_shim)");
     println!("cargo:rustc-check-cfg=cfg(has_client_fixes)");
+    // Same pattern for 7-Zip's standalone extractor, which only the Download
+    // tab's backup uses (download.rs). Without it the backup needs 7-Zip
+    // installed on the player's PC.
+    println!("cargo:rustc-check-cfg=cfg(has_7zr)");
+    println!("cargo:rerun-if-changed=resources/7zr.exe");
+    if std::path::Path::new("resources/7zr.exe").is_file() {
+        println!("cargo:rustc-cfg=has_7zr");
+    } else {
+        println!("cargo:warning=resources/7zr.exe is missing -- the Download tab's backup will need 7-Zip installed on the player's PC. See resources/README.md.");
+    }
     println!("cargo:rerun-if-changed=resources/XAPOFX1_5.dll");
     if std::path::Path::new("resources/XAPOFX1_5.dll").is_file() {
         println!("cargo:rustc-cfg=has_shim");
