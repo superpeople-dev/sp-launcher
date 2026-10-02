@@ -5,7 +5,7 @@ interface Props {
   onError: (message: string) => void;
 }
 
-/** Mirrors `auth::GameRegion`: region is "any" or one of regions, which counts servers per region. */
+/** Mirrors `auth::GameRegion`: region is where the player's matches are (one of regions), regions counts servers per region. */
 interface GameRegion {
   region: string;
   regions: Record<string, number>;
@@ -24,9 +24,10 @@ const NAMES: Record<string, string> = {
 const servers = (n: number) => (n === 1 ? "1 server" : `${n} servers`);
 
 /**
- * Next to Play: the region the player's matches are in (account_region in lib.rs). Only regions with
- * servers right now, and Any. Hidden until the backend answers, and when it has no regions (an older
- * backend, or the sign-in pass was refused: Play says why).
+ * Next to Play: the region the player's matches are in (account_region in lib.rs). Every match is in one
+ * region, so there is no "Any": only the regions with servers right now (Europe for now; more as they get
+ * servers). Without a pick the backend answers Europe. Hidden until the backend answers, and when it has
+ * no regions (an older backend, or the sign-in pass was refused: Play says why).
  */
 export function RegionPicker({ onError }: Props) {
   const [state, setState] = useState<GameRegion | null>(null);
@@ -58,13 +59,11 @@ export function RegionPicker({ onError }: Props) {
     }
   };
 
-  const options = [{ id: "any", label: "Any", title: "Matches on any server. In a party, the leader's region counts." }].concat(
-    offered.map((id) => ({
-      id,
-      label: NAMES[id],
-      title: `Matches only on servers in ${NAMES[id]} (${servers(state.regions[id])} now). In a party, the leader's region counts.`,
-    })),
-  );
+  const options = offered.map((id) => ({
+    id,
+    label: NAMES[id],
+    title: `Matches on servers in ${NAMES[id]} (${servers(state.regions[id])} now). In a party, the leader's region counts.`,
+  }));
 
   return (
     <div className="region">
