@@ -150,9 +150,10 @@ export function TitleBar({ tab, onTab, profile, onSignOut }: Props) {
   );
 }
 
-// A section's list stays open this long after the pointer leaves, so moving down into it from the
-// tab does not close it.
-const CLOSE_MS = 160;
+// A section's list starts to close this long after the pointer leaves, so a pointer cutting the
+// corner from the tab to an item on the right keeps it. Short enough not to be seen as a wait; the
+// list then fades out (community.css), and coming back while it fades turns it round.
+const CLOSE_MS = 80;
 
 /** A section of the top menu: its pages in a list below it, on hover or click. */
 function SectionMenu({ section, tab, onTab }: { section: Section; tab: Tab; onTab: (tab: Tab) => void }) {
@@ -198,28 +199,27 @@ function SectionMenu({ section, tab, onTab }: { section: Section; tab: Tab; onTa
           <path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.4" />
         </svg>
       </button>
-      {open && (
-        <div className="section__menu" role="menu">
-          {section.pages.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              role="menuitem"
-              className={`section__item${p.id === tab ? " is-on" : ""}`}
-              onClick={() => {
-                setOpen(false);
-                onTab(p.id);
-              }}
-            >
-              <span className="section__icon">{p.icon}</span>
-              <span className="section__text">
-                <span className="section__name">{p.label}</span>
-                <span className="section__hint">{p.hint}</span>
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
+      {/* Always there, hidden while closed, so it can fade out as well as in. */}
+      <div className={`section__menu${open ? " is-open" : ""}`} role="menu">
+        {section.pages.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            role="menuitem"
+            className={`section__item${p.id === tab ? " is-on" : ""}`}
+            onClick={() => {
+              setOpen(false);
+              onTab(p.id);
+            }}
+          >
+            <span className="section__icon">{p.icon}</span>
+            <span className="section__text">
+              <span className="section__name">{p.label}</span>
+              <span className="section__hint">{p.hint}</span>
+            </span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -273,38 +273,37 @@ function ProfileMenu({
           <path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.4" />
         </svg>
       </button>
-      {open && (
-        <div className="me__menu" role="menu">
-          <div className="me__who">
-            <Avatar person={profile} size={36} />
-            <div>
-              <div className="me__name">{profile.name}</div>
-              <div className="me__user">@{profile.username}</div>
-            </div>
+      {/* Always there, hidden while closed, so it can fade out as well as in. */}
+      <div className={`me__menu${open ? " is-open" : ""}`} role="menu">
+        <div className="me__who">
+          <Avatar person={profile} size={36} />
+          <div>
+            <div className="me__name">{profile.name}</div>
+            <div className="me__user">@{profile.username}</div>
           </div>
-          <button type="button" role="menuitem" className="me__item" onClick={pick(onRename)}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-              <path d="M4 20h4L19 9l-4-4L4 16v4z" />
-              <path d="M13 7l4 4" />
-            </svg>
-            In-game name
-          </button>
-          <button type="button" role="menuitem" className="me__item" onClick={pick(onSettings)}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-              <path d="M4 7h9M17 7h3M4 17h3M11 17h9" />
-              <circle cx="15" cy="7" r="2" />
-              <circle cx="9" cy="17" r="2" />
-            </svg>
-            Settings
-          </button>
-          <button type="button" role="menuitem" className="me__item me__item--out" onClick={pick(onSignOut)}>
-            <svg viewBox="0 0 24 24" aria-hidden>
-              <path d="M10 4H5v16h5M15 8l4 4-4 4M19 12H9" fill="none" stroke="currentColor" strokeWidth="1.8" />
-            </svg>
-            Sign out
-          </button>
         </div>
-      )}
+        <button type="button" role="menuitem" className="me__item" onClick={pick(onRename)}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+            <path d="M4 20h4L19 9l-4-4L4 16v4z" />
+            <path d="M13 7l4 4" />
+          </svg>
+          In-game name
+        </button>
+        <button type="button" role="menuitem" className="me__item" onClick={pick(onSettings)}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+            <path d="M4 7h9M17 7h3M4 17h3M11 17h9" />
+            <circle cx="15" cy="7" r="2" />
+            <circle cx="9" cy="17" r="2" />
+          </svg>
+          Settings
+        </button>
+        <button type="button" role="menuitem" className="me__item me__item--out" onClick={pick(onSignOut)}>
+          <svg viewBox="0 0 24 24" aria-hidden>
+            <path d="M10 4H5v16h5M15 8l4 4-4 4M19 12H9" fill="none" stroke="currentColor" strokeWidth="1.8" />
+          </svg>
+          Sign out
+        </button>
+      </div>
     </div>
   );
 }
