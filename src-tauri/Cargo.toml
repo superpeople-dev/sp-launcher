@@ -23,7 +23,7 @@ tauri-plugin-updater = "2"
 # deep-link: an sp-launcher:// link opened while the launcher runs reaches the running one.
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 # sp-launcher://replay/... links from a reported match's page (replays.rs).
-tauri-plugin-deep-link = "2"
+tauri-plugin-deep-link = "~2.4.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
