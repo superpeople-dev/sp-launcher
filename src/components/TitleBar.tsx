@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import logo from "../assets/sp-logo.png";
 import type { Profile, Tab } from "../types";
 import { Avatar } from "./community/Avatar";
+import { NameDialog } from "./NameDialog";
 
 // Settings lives in the profile menu, next to Sign out: six tabs do not fit
 // the 860 px window.
@@ -31,60 +32,72 @@ export function TitleBar({ tab, onTab, profile, onSignOut }: Props) {
   // ending the process.
   const minimize = () => void getCurrentWindow().minimize();
   const hideToTray = () => void invoke("hide_to_tray");
+  const [renaming, setRenaming] = useState(false);
 
   return (
-    <header className="topbar" data-tauri-drag-region>
-      <div className="brand" data-tauri-drag-region>
-        <img className="brand__logo" src={logo} alt="SP" draggable={false} />
-      </div>
+    <>
+      <header className="topbar" data-tauri-drag-region>
+        <div className="brand" data-tauri-drag-region>
+          <img className="brand__logo" src={logo} alt="SP" draggable={false} />
+        </div>
 
-      {profile ? (
-        <nav className="nav">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              className={`tab${tab === t.id ? " is-active" : ""}`}
-              onClick={() => onTab(t.id)}
-              type="button"
-            >
-              {t.label}
-            </button>
-          ))}
-        </nav>
-      ) : (
-        <div className="nav" data-tauri-drag-region />
-      )}
+        {profile ? (
+          <nav className="nav">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                className={`tab${tab === t.id ? " is-active" : ""}`}
+                onClick={() => onTab(t.id)}
+                type="button"
+              >
+                {t.label}
+              </button>
+            ))}
+          </nav>
+        ) : (
+          <div className="nav" data-tauri-drag-region />
+        )}
 
-      {profile && <ServerPill />}
-      {profile && (
-        <ProfileMenu profile={profile} settings={tab === "settings"} onSettings={() => onTab("settings")} onSignOut={onSignOut} />
-      )}
+        {profile && <ServerPill />}
+        {profile && (
+          <ProfileMenu
+            profile={profile}
+            settings={tab === "settings"}
+            onRename={() => setRenaming(true)}
+            onSettings={() => onTab("settings")}
+            onSignOut={onSignOut}
+          />
+        )}
 
-      <div className="winbtns">
-        <button className="winbtn" title="Minimize" type="button" onClick={minimize}>
-          <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4">
-            <path d="M2 6h8" />
-          </svg>
-        </button>
-        <button className="winbtn winbtn--close" title="Minimize to tray" type="button" onClick={hideToTray}>
-          <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4">
-            <path d="M2.5 2.5l7 7M9.5 2.5l-7 7" />
-          </svg>
-        </button>
-      </div>
-    </header>
+        <div className="winbtns">
+          <button className="winbtn" title="Minimize" type="button" onClick={minimize}>
+            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4">
+              <path d="M2 6h8" />
+            </svg>
+          </button>
+          <button className="winbtn winbtn--close" title="Minimize to tray" type="button" onClick={hideToTray}>
+            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4">
+              <path d="M2.5 2.5l7 7M9.5 2.5l-7 7" />
+            </svg>
+          </button>
+        </div>
+      </header>
+      {renaming && profile && <NameDialog onClose={() => setRenaming(false)} />}
+    </>
   );
 }
 
-/** The player's Discord picture; opens their name, Settings and Sign out. */
+/** The player's Discord picture; opens their name, the in-game name, Settings and Sign out. */
 function ProfileMenu({
   profile,
   settings,
+  onRename,
   onSettings,
   onSignOut,
 }: {
   profile: Profile;
   settings: boolean;
+  onRename: () => void;
   onSettings: () => void;
   onSignOut: () => void;
 }) {
@@ -132,6 +145,13 @@ function ProfileMenu({
               <div className="me__user">@{profile.username}</div>
             </div>
           </div>
+          <button type="button" role="menuitem" className="me__item" onClick={pick(onRename)}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+              <path d="M4 20h4L19 9l-4-4L4 16v4z" />
+              <path d="M13 7l4 4" />
+            </svg>
+            In-game name
+          </button>
           <button type="button" role="menuitem" className="me__item" onClick={pick(onSettings)}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
               <path d="M4 7h9M17 7h3M4 17h3M11 17h9" />

@@ -585,6 +585,10 @@
 .uninstall__error{ margin-top: 8px; }
 .uninstall__done{ margin: 4px 0 0; font-family: var(--read); font-size: 13px; }
 
+/* the in-game name (NameDialog.tsx) */
+.dialog__card.rename{ width: min(440px, calc(100% - 40px)); }
+.rename__done{ margin: 4px 0 0; font-family: var(--read); font-size: 13px; }
+
 /* the Terms of Service before Play (TermsDialog.tsx) */
 .dialog__card.terms{ width: min(640px, calc(100% - 40px)); }
 .terms__lead{ margin: 2px 0 10px; }
