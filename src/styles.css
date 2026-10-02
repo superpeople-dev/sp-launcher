@@ -220,7 +220,6 @@ html, body, #root{
     rgba(239,68,56,0.10) 100%);
 }
 .tab.is-active::before{ opacity:1; }
-.tab:focus-visible{ outline:2px solid var(--signal-hi); outline-offset:-3px; }
 
 .winbtns{ display:flex; align-items:stretch; -webkit-app-region: no-drag; }
 .winbtn{
@@ -433,7 +432,6 @@ html, body, #root{
   transition: background .15s ease, color .15s ease;
 }
 .argbar__btn:hover{ background: rgba(255,255,255,0.12); color: var(--paper); }
-.argbar__btn:focus-visible{ outline:2px solid var(--signal); outline-offset:-2px; }
 .argbar__gear{ flex:0 0 13px; display:grid; place-items:center; }
 .argbar__gear svg{ width:13px; height:13px; transition: transform .3s ease; }
 .argbar__btn:hover .argbar__gear svg{ transform: rotate(60deg); }
@@ -481,7 +479,6 @@ html, body, #root{
 }
 .cta:hover{ background: #f4574b; }
 .cta:active{ background: #cf3327; }
-.cta:focus-visible{ outline:2px solid var(--signal-hi); outline-offset:3px; }
 .cta__inner{
   position:relative; z-index:2; height:100%;
   display:flex; align-items:center; justify-content:space-between;
@@ -536,7 +533,6 @@ html, body, #root{
   font-family: var(--font-mono); font-size:13px;
 }
 .connect__input::placeholder{ color: var(--muted); }
-.connect__input:focus-visible{ outline:2px solid var(--signal); outline-offset:-2px; }
 .connect__play{
   appearance:none; border:0; flex:0 0 88px; height:44px;
   cursor:pointer;
@@ -604,7 +600,6 @@ html, body, #root{
 .discord:hover{
   background: #5865f2; border-color:#5865f2; color:#fff;
 }
-.discord:focus-visible{ outline:2px solid var(--signal); outline-offset:2px; }
 
 /* ============================================================
    PANEL: DOWNLOAD
@@ -957,7 +952,6 @@ input, textarea{ user-select:text; }
   height:40px;
 }
 .signin__input::placeholder{ color: var(--muted); letter-spacing:0.16em; }
-.signin__input:focus-visible{ outline:2px solid var(--signal); outline-offset:-2px; }
 .signin__submit{
   height:40px;
   padding:0 20px;

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { CommunityItem, ItemStatus, Profile } from "../../types";
 import { ItemDetail } from "./ItemDetail";
+import { Tag } from "./Tag";
 import { useBoard } from "./useBoard";
 import { VoteControl } from "./VoteControl";
 
@@ -75,11 +76,7 @@ function Task({ item, onOpen, onVote }: { item: CommunityItem; onOpen: () => voi
   return (
     <div className="task" role="button" tabIndex={0} onClick={onOpen} onKeyDown={(e) => e.key === "Enter" && onOpen()}>
       <div className="task__tags">
-        {item.tags.map((t) => (
-          <span key={t.name} className="tag" style={{ color: t.color, borderColor: `${t.color}66` }}>
-            {t.name}
-          </span>
-        ))}
+        {item.tags.map((t) => <Tag key={t.name} tag={t} />)}
       </div>
       <p className="task__title">{item.title}</p>
       <div className="task__foot">

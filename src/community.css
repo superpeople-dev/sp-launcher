@@ -14,8 +14,9 @@
 /* Selected text in the launcher's red, as on the website. */
 ::selection{ background: var(--signal); color: #fff; }
 
-/* Keyboard focus (Tab) in the launcher's red, never the browser's white ring. */
-:focus-visible{ outline: 2px solid var(--signal-hi); outline-offset: 2px; }
+/* No focus rings: Tab does not move between elements (App.tsx), and a click never outlines what
+   it pressed. */
+:focus, :focus-visible{ outline: none; }
 
 /* ---- avatars ---- */
 .avatar{
@@ -82,7 +83,6 @@
 .discordbtn svg{ width: 24px; height: 24px; }
 /* Colour only on hover: buttons stay where they are. */
 .discordbtn:hover{ background: #4752c4; }
-.discordbtn:focus-visible{ outline: 2px solid var(--signal-hi); outline-offset: 3px; }
 .welcome__waiting{
   display:flex; align-items:center; gap: 10px;
   height: 48px; padding: 0 18px;
@@ -251,14 +251,18 @@
 .seg__btn:hover{ color: var(--paper); }
 .seg__btn.is-on{ color: #fff; background: rgba(239,68,56,0.16); box-shadow: inset 0 -2px 0 var(--signal-hi); }
 
+/* An item's tag (Tag.tsx): its icon and name in the tag's colour, set close. */
 .tag{
-  display:inline-block;
-  padding: 1px 6px;
-  border: 1px solid currentColor;
-  font-size: 10.5px; font-weight: 800; line-height: 1.5;
-  letter-spacing: 0.1em; text-transform: uppercase;
+  display:inline-flex; align-items:center; gap: 4px;
+  padding: 1px 6px 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--tag, currentColor) 40%, transparent);
+  color: var(--tag, currentColor);
+  /* The launcher's condensed face: in the text's Segoe UI the uppercase names ran wide. */
+  font-family: var(--font); font-size: 12px; font-weight: 800; line-height: 1.4;
+  letter-spacing: 0.04em; text-transform: uppercase;
   white-space: nowrap;
 }
+.tag .icon{ width: 11px; height: 11px; stroke-width: 2.2; }
 .status{
   display:inline-block;
   padding: 2px 8px;
@@ -342,7 +346,8 @@
   display:-webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow:hidden;
 }
 .row__meta{ display:flex; align-items:center; gap: 10px; font-family: var(--read); font-size: 11px; color: var(--muted); }
-.row__tag{ font-family: var(--font); font-size: 11px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; }
+.row__tag{ display:inline-flex; align-items:center; gap: 4px; font-family: var(--font); font-size: 11px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; }
+.row__tag .icon{ width: 11px; height: 11px; stroke-width: 2.2; }
 .row__comments, .task__comments{ display:inline-flex; align-items:center; gap: 4px; }
 .row__comments svg, .task__comments svg{ width: 13px; height: 13px; fill:none; stroke: currentColor; stroke-width: 1.8; }
 
@@ -506,7 +511,6 @@
   border-top-color: var(--line); border-right-color: var(--line); border-bottom-color: var(--line);
   background: linear-gradient(150deg, rgba(34,44,56,0.62), rgba(16,22,30,0.48));
 }
-.task:focus-visible{ outline: 2px solid var(--signal-hi); outline-offset: 1px; }
 .task__tags{ display:flex; gap: 5px; flex-wrap: wrap; }
 .task__title{ margin:0; font-family: var(--read); font-size: 13.5px; font-weight: 600; line-height: 1.35; color: var(--paper); }
 .task__foot{ display:flex; align-items:center; justify-content:space-between; font-family: var(--read); font-size: 11.5px; color: var(--muted); }
@@ -519,7 +523,6 @@
 .done__head{ display:flex; align-items:baseline; gap: 14px; }
 .done__title{ margin:0; font-size: 22px; font-weight: 900; letter-spacing: 0.08em; text-transform: uppercase; color: #fff; }
 .done__lead{ margin:0; font-family: var(--read); font-size: 12.5px; color: var(--muted); }
-.done__more{ justify-self: center; }
 .done__empty{ color: var(--muted); font-family: var(--read); font-size: 13px; }
 .timeline{
   list-style:none; margin:0; padding: 0 6px 0 0; min-height: 0;
@@ -593,7 +596,6 @@
   background: rgba(5,8,12,0.45);
   font-family: var(--read); font-size: 13px; line-height: 1.55; color: var(--paper-dim);
 }
-.terms__body:focus-visible{ outline: 1px solid var(--line); }
 .terms__body p{ margin: 0 0 10px; }
 .terms__date{ font-size: 11.5px; color: var(--muted); }
 .terms__doc + .terms__doc{ margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
@@ -622,6 +624,5 @@
   transform: translateY(-1px) rotate(-45deg);
 }
 .terms__check:disabled{ opacity: 0.5; }
-.terms__check:focus-visible{ outline: 2px solid var(--signal-hi); outline-offset: 2px; }
 .terms__scroll, .terms__problem{ margin: 6px 0 0 25px; }
 .field__count{ float: right; font-weight: 400; letter-spacing: 0; color: #5d6670; font-family: var(--read); }
