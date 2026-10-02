@@ -108,6 +108,31 @@
 @keyframes slidein{ from{ transform: translateX(24px); opacity:0; } to{ transform:none; opacity:1; } }
 @keyframes shimmer{ from{ background-position: 100% 0; } to{ background-position: -100% 0; } }
 
+/* ---- the top menu's sections (TitleBar.tsx SectionMenu) ---- */
+.section{ position: relative; display:flex; }
+.section__btn{ display:flex; align-items:center; gap: 6px; }
+.section__chev{ width: 9px; height: 9px; opacity: 0.7; transition: transform .15s ease; }
+.section.is-open .section__btn{ color: #fff; background: rgba(255,255,255,0.05); }
+.section.is-open .section__chev{ transform: rotate(180deg); }
+.section__menu{
+  position:absolute; top: 100%; left: 0; z-index: 40;
+  width: 270px; padding: 6px;
+  background: #16161a;
+  border: 1px solid var(--line);
+  box-shadow: 0 18px 44px rgba(0,0,0,0.6);
+  animation: rise .14s ease both;
+}
+.section__item{
+  width:100%; display:flex; flex-direction:column; gap: 2px;
+  padding: 8px 9px;
+  appearance:none; border:0; background: transparent; text-align: left;
+  color: var(--paper-dim); cursor: pointer;
+}
+.section__item:hover{ background: rgba(255,255,255,0.06); color: #fff; }
+.section__item.is-on{ color: #fff; box-shadow: inset 2px 0 0 var(--signal-hi); }
+.section__name{ font-family: var(--font); font-size: 13.5px; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; }
+.section__hint{ font-family: var(--read); font-size: 11.5px; color: var(--muted); }
+
 /* ---- profile button + menu, top right ---- */
 .me{ position: relative; display:flex; -webkit-app-region: no-drag; }
 .me__btn{
@@ -307,7 +332,7 @@
   background: rgba(255,255,255,0.14); border: 2px solid transparent; background-clip: content-box; border-radius: 8px;
 }
 
-.row--ghost, .task--ghost, .entry--ghost, .chan--ghost, .thread__loading span, .skel{
+.row--ghost, .task--ghost, .entry--ghost, .chan--ghost, .leader--ghost, .thread__loading span, .skel{
   border: 1px solid var(--line-soft);
   background: linear-gradient(90deg, rgba(255,255,255,0.02), rgba(255,255,255,0.05), rgba(255,255,255,0.02));
   background-size: 200% 100%;
@@ -588,6 +613,43 @@
 /* the in-game name (NameDialog.tsx) */
 .dialog__card.rename{ width: min(440px, calc(100% - 40px)); }
 .rename__done{ margin: 4px 0 0; font-family: var(--read); font-size: 13px; }
+
+/* the Leaderboard page (LeaderboardPanel.tsx); tier colours as on the website */
+.leaders{ grid-template-rows: auto auto minmax(0, 1fr); gap: 10px; min-height: 0; }
+.leaders__bar{ display:flex; align-items:center; gap: 8px; }
+.leaders__search{ position: relative; display:flex; align-items:center; margin-left: auto; width: 220px; }
+.leaders__search svg{ position:absolute; left: 9px; width: 13px; height: 13px; color: var(--muted); pointer-events:none; }
+.leaders__search .input{ padding-left: 28px; height: 30px; }
+.leaders__empty{ display:flex; align-items:center; gap: 12px; }
+.leaders__list{ list-style:none; margin:0; padding:0 4px 0 0; display:flex; flex-direction:column; gap: 5px; overflow-y:auto; overscroll-behavior: contain; min-height:0; }
+.leader{
+  display:grid; grid-template-columns: 46px minmax(0, 1fr) 150px 110px; align-items:center; gap: 12px;
+  min-height: 38px; padding: 0 14px;
+  border: 1px solid var(--line-soft);
+  background: linear-gradient(150deg, rgba(24,32,42,0.5), rgba(11,16,23,0.36));
+}
+.leader.is-top{ background: linear-gradient(150deg, rgba(36,40,50,0.6), rgba(14,18,24,0.45)); }
+.leader__rank{ font-size: 16px; font-weight: 900; color: var(--paper-dim); font-variant-numeric: tabular-nums; }
+.is-top-1 .leader__rank{ color: var(--gold); }
+.is-top-2 .leader__rank{ color: #c9d0d8; }
+.is-top-3 .leader__rank{ color: #c98a5a; }
+.leader__name{ display:flex; align-items:center; gap: 9px; min-width:0; font-size: 14.5px; font-weight: 800; letter-spacing: 0.04em; overflow:hidden; white-space:nowrap; }
+.leader__name bdi{ overflow:hidden; text-overflow:ellipsis; }
+.leader__flag{ flex:none; width: 21px; height: 14px; border-radius: 2px; box-shadow: 0 0 0 1px var(--line); }
+.leader__tier{ font-size: 12px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; white-space:nowrap; color: var(--muted); }
+.leader__rp{ text-align:right; font-size: 15px; font-weight: 800; font-variant-numeric: tabular-nums; white-space:nowrap; }
+.leader__rp small{ font-size: 10.5px; color: var(--muted); letter-spacing: 0.08em; }
+.leader--ghost{ min-height: 38px; }
+.tier--iron{ color: #9a958f; }
+.tier--bronze{ color: #c98a5a; }
+.tier--silver{ color: #c9d0d8; }
+.tier--gold{ color: var(--gold); }
+.tier--platinum{ color: #5fd3c6; }
+.tier--diamond{ color: #7fb2ff; }
+.tier--master{ color: #b88cff; }
+.tier--grandMaster{ color: #ff7a8a; }
+.tier--legendary{ color: #ff9d3d; }
+.tier--superSoldier{ color: var(--signal-hi); }
 
 /* the Twitch tab (TwitchPanel.tsx) */
 .twitch{ grid-template-rows: auto minmax(0, 1fr); gap: 12px; min-height: 0; }
