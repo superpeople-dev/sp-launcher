@@ -337,6 +337,14 @@ fn expired(app: &AppHandle, state: &State<'_, AppState>, error: LauncherError) -
     error
 }
 
+/// The player's in-game name and when they may change it next; with `name`,
+/// changes it (auth::game_name).
+#[tauri::command]
+async fn account_name(app: AppHandle, state: State<'_, AppState>, name: Option<String>) -> Result<auth::GameName> {
+    let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
+    auth::game_name(&session, name.as_deref()).await.map_err(|e| expired(&app, &state, e))
+}
+
 #[tauri::command]
 fn auth_status(state: State<'_, AppState>) -> auth::AuthState {
     let cfg = state.config.lock().expect("config mutex");
@@ -1062,6 +1070,7 @@ pub fn run() {
             launch_game,
             stop_game,
             auth_status,
+            account_name,
             discord_connect,
             discord_cancel,
             sign_out,

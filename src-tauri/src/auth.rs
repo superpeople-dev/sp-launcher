@@ -126,6 +126,15 @@ struct ApiError {
     until: Option<String>,
 }
 
+/// The player's in-game name, and when they may change it next: an ISO time,
+/// or None when they may change it now (`game_name`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct GameName {
+    pub name: String,
+    #[serde(default)]
+    pub next_change_at: Option<String>,
+}
+
 /// The backend's one-time login ticket, on its way to the game process.
 #[derive(Debug, Clone)]
 pub struct Ticket {
@@ -155,6 +164,14 @@ pub fn explain(code: &str, until: Option<&str>) -> String {
         "PC_BANNED" => "This PC is banned from playing SUPER PEOPLE. If you think this is a mistake, ask a moderator in Discord.".into(),
         // The codes are read once per launcher run (pcid.rs): a restart reads them again.
         "PC_ID_REQUIRED" => "The launcher couldn't identify this PC, which is needed to play. Restart the launcher and try again. If it keeps happening, ask in Discord.".into(),
+        // Changing the in-game name (`game_name`).
+        "NAME_LENGTH" => "A name has 2 to 16 characters.".into(),
+        "NAME_CHARACTERS" => "Use letters, numbers, _ . and - only, without spaces.".into(),
+        "NAME_FORBIDDEN" => "That name isn't allowed. Pick another one.".into(),
+        "NAME_TAKEN" => "Another player already has that name.".into(),
+        "NAME_SAME" => "That's already your name.".into(),
+        "NAME_COOLDOWN" => "You can change your name once every 14 days.".into(),
+        "NO_CHARACTER" => "You don't have a character yet. Press Play once to create it, then you can change its name here.".into(),
         "" => OOPS.into(),
         other if other.starts_with("HTTP_") => OOPS.into(),
         other => format!("Oops, something went wrong ({other}). Try again in a moment."),
@@ -367,6 +384,35 @@ pub async fn discord_launch(pass: &str, device_id: &str, pc: &pcid::Codes) -> Re
     let err: ApiError = serde_json::from_str(&text).unwrap_or_default();
     let code = if err.error.is_empty() { format!("HTTP_{}", status.as_u16()) } else { err.error };
     Err(LauncherError::Message(explain(&code, err.until.as_deref())))
+}
+
+/// Reads the player's in-game name (`name` None) or changes it, with a fresh
+/// game pass: the backend (routes/launcher.js POST /account/name) only renames
+/// the character of the Discord account the website signed the pass for, once
+/// every 14 days, and checks the name itself.
+pub async fn game_name(session: &str, name: Option<&str>) -> Result<GameName> {
+    let pass = game_pass(session).await?;
+    let url = format!("{AUTH_BASE_URL}/account/name");
+    let res = send(client()?.post(url).json(&name_body(&pass, name))).await?;
+    let status = res.status();
+    let text = res.text().await.unwrap_or_default();
+    if status.is_success() {
+        return serde_json::from_str(&text).map_err(|_| LauncherError::Message(OOPS.into()));
+    }
+    let err: ApiError = serde_json::from_str(&text).unwrap_or_default();
+    // A backend from before the route: a 404 without a code of ours.
+    if status.as_u16() == 404 && err.error.is_empty() {
+        return Err(LauncherError::Message("The game server can't change names yet. Try again later.".into()));
+    }
+    let code = if err.error.is_empty() { format!("HTTP_{}", status.as_u16()) } else { err.error };
+    Err(LauncherError::Message(explain(&code, err.until.as_deref())))
+}
+
+fn name_body(pass: &str, name: Option<&str>) -> serde_json::Value {
+    match name {
+        Some(name) => serde_json::json!({ "pass": pass, "name": name }),
+        None => serde_json::json!({ "pass": pass }),
+    }
 }
 
 /// What Play sends the backend: the pass, this install's id, and this PC's
@@ -712,6 +758,18 @@ mod tests {
         // A bare HTTP status (an error page, a missing route) is never shown.
         assert_eq!(explain("HTTP_404", None), OOPS);
         assert!(!explain("HTTP_502", None).contains("502"));
+    }
+
+    #[test]
+    fn renaming_reads_without_a_name_and_explains_every_refusal() {
+        assert_eq!(name_body("p", None), serde_json::json!({ "pass": "p" }));
+        assert_eq!(name_body("p", Some("Neo")), serde_json::json!({ "pass": "p", "name": "Neo" }));
+        for code in ["NAME_LENGTH", "NAME_CHARACTERS", "NAME_FORBIDDEN", "NAME_TAKEN", "NAME_SAME", "NAME_COOLDOWN", "NO_CHARACTER"] {
+            let text = explain(code, None);
+            assert!(!text.contains(code) && text != OOPS, "{code}: {text}");
+        }
+        let read: GameName = serde_json::from_str(r#"{"ok":true,"name":"Neo","next_change_at":null}"#).unwrap();
+        assert_eq!(read, GameName { name: "Neo".into(), next_change_at: None });
     }
 
     #[test]
