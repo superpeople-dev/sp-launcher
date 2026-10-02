@@ -126,8 +126,9 @@ struct ApiError {
     until: Option<String>,
 }
 
-/// The region the player's matches are in ("any", or one of `regions`), and
-/// the regions with servers now with how many each (`game_region`).
+/// The region the player's matches are in (one of `regions`; every match is in
+/// one region), and the regions with servers now with how many each
+/// (`game_region`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct GameRegion {
     pub region: String,
@@ -420,7 +421,7 @@ pub async fn game_name(session: &str, name: Option<&str>) -> Result<GameName> {
 }
 
 /// Reads the region the player's matches are in (`region` None) or picks one
-/// ("any" or a region with servers), with a fresh game pass: the backend
+/// (a region with servers), with a fresh game pass: the backend
 /// (routes/launcher.js POST /account/region) keeps it for that Discord
 /// account, and a party plays where its leader picked.
 pub async fn game_region(session: &str, region: Option<&str>) -> Result<GameRegion> {
@@ -439,7 +440,7 @@ pub async fn game_region(session: &str, region: Option<&str>) -> Result<GameRegi
     let err: ApiError = serde_json::from_str(&text).unwrap_or_default();
     // A backend from before regions: no regions, so the picker stays hidden.
     if status.as_u16() == 404 && err.error.is_empty() {
-        return Ok(GameRegion { region: "any".into(), regions: Default::default() });
+        return Ok(GameRegion { region: String::new(), regions: Default::default() });
     }
     let code = if err.error.is_empty() { format!("HTTP_{}", status.as_u16()) } else { err.error };
     Err(LauncherError::Message(explain(&code, err.until.as_deref())))
