@@ -11,6 +11,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { DownloadPanel } from "./components/DownloadPanel";
 import { Welcome } from "./components/Welcome";
 import { TermsDialog } from "./components/TermsDialog";
+import { ReplayDialog } from "./components/ReplayDialog";
 import { BanDialog, bannedLine } from "./components/BanNotice";
 import { IdeasPanel } from "./components/community/IdeasPanel";
 import { RoadmapPanel } from "./components/community/RoadmapPanel";
@@ -79,6 +80,9 @@ export default function App() {
   // it again (BanDialog). "closed": the launcher closed the game because of it.
   const [ban, setBan] = useState<Ban | null>(null);
   const [banDialog, setBanDialog] = useState<"play" | "closed" | null>(null);
+  // A reported match opened from its page (sp-launcher://replay/..., lib.rs replay_link): its id
+  // while the admin is asked whether to add it to the game's replays.
+  const [replayLink, setReplayLink] = useState<string | null>(null);
 
   const [appVersion, setAppVersion] = useState("");
   const [update, setUpdate] = useState<Update | null>(null);
@@ -394,6 +398,13 @@ export default function App() {
     };
   }, [profileId, install.installed, installDir]);
 
+  // A replay link that started the launcher came before this page could listen: it waits in lib.rs.
+  useEffect(() => {
+    void invoke<string | null>("replay_link")
+      .then((id) => id && setReplayLink(id))
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     const unlisten: Promise<() => void>[] = [
       // The game exited: re-read the hosts state (the entries stay in place).
@@ -417,6 +428,8 @@ export default function App() {
       // Play found files that are not the official ones: the button becomes
       // Verify files.
       listen<GameFiles>("files:changed", (e) => setFiles(e.payload)),
+      // A replay link opened while the launcher runs.
+      listen<string>("replay:link", (e) => setReplayLink(e.payload)),
     ];
     return () => {
       unlisten.forEach((p) => void p.then((off) => off()));
@@ -672,6 +685,8 @@ export default function App() {
           }}
         />
       )}
+
+      {replayLink && <ReplayDialog key={replayLink} onClose={() => setReplayLink(null)} />}
 
       {profile && ban && !ban.permanent && banDialog && (
         <BanDialog ban={ban} why={banDialog} onClose={() => setBanDialog(null)} />

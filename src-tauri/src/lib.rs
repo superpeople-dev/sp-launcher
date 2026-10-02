@@ -53,6 +53,10 @@ pub struct AppState {
     signing_in: Arc<Mutex<Option<SignIn>>>,
     /// The platforms and types an idea is filed under, from the last page load.
     meta: Mutex<community::Meta>,
+    /// A reported match's link (sp-launcher://replay/...) waiting for the
+    /// admin's yes (replays.rs). Kept here so a link that started the launcher
+    /// is still there when its page has loaded.
+    replay_link: Mutex<Option<replays::Link>>,
 }
 
 type SignIn = tokio::sync::oneshot::Sender<std::result::Result<String, String>>;
@@ -1033,6 +1037,74 @@ async fn uninstall_game(app: AppHandle) -> Result<()> {
     .map_err(|e| LauncherError::Message(e.to_string()))?
 }
 
+// ------------------------------------------------------------- replays ---
+// A reported match opened from its page: sp-launcher://replay/<id>?t=<token>
+// (replays.rs). The window asks the admin first (ReplayDialog.tsx), then
+// replay_import downloads it with the token and unzips it into the game's
+// Demos folder, for the game's Replay menu.
+
+/// A link Windows handed over: kept, the window shown, and told.
+fn replay_link_opened(app: &AppHandle, url: &str) {
+    let Some(link) = replays::link_of(url) else { return };
+    let id = link.id.clone();
+    if let Some(state) = app.try_state::<AppState>() {
+        *state.replay_link.lock().expect("replay link mutex") = Some(link);
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        show_from_tray_window(&window);
+    }
+    let _ = app.emit("replay:link", id);
+}
+
+/// The replay link waiting for an answer: its id, or None.
+#[tauri::command]
+fn replay_link(state: State<'_, AppState>) -> Option<String> {
+    state.replay_link.lock().expect("replay link mutex").as_ref().map(|l| l.id.clone())
+}
+
+/// The admin said no: the link is dropped.
+#[tauri::command]
+fn replay_dismiss(state: State<'_, AppState>) {
+    state.replay_link.lock().expect("replay link mutex").take();
+}
+
+/// The admin said yes: the replay, downloaded with the link's token and put in
+/// the game's Demos folder.
+#[tauri::command]
+async fn replay_import(state: State<'_, AppState>) -> Result<replays::Imported> {
+    let link = state.replay_link.lock().expect("replay link mutex").take();
+    let Some(link) = link else {
+        return Err(LauncherError::Message("Open the replay's page again from Discord and press Open in the launcher.".into()));
+    };
+    let Some(demos) = replays::demos_dir() else {
+        return Err(LauncherError::Message("The game's replay folder could not be found on this PC.".into()));
+    };
+    let bytes = match replays::fetch(auth::AUTH_BASE_URL, &link).await {
+        replays::Fetched::Zip(bytes) => bytes,
+        replays::Fetched::Expired => {
+            return Err(LauncherError::Message(
+                "This link was used already or is older than 10 minutes. Open the replay's page again from Discord and press Open in the launcher.".into(),
+            ))
+        }
+        replays::Fetched::Gone => return Err(LauncherError::Message("This replay is no longer on the server: replays are kept 30 days.".into())),
+        replays::Fetched::TooBig => return Err(LauncherError::Message("This replay is too big to be one match.".into())),
+        replays::Fetched::Failed => {
+            return Err(LauncherError::Message("The replay could not be downloaded. Check your connection and open the link again.".into()))
+        }
+    };
+    let imported = tauri::async_runtime::spawn_blocking(move || replays::import(&bytes, &demos))
+        .await
+        .map_err(|e| LauncherError::Message(e.to_string()))?;
+    match imported {
+        Ok(done) => Ok(done),
+        Err(replays::ImportProblem::NotReplay) => Err(LauncherError::Message("That download is not a game replay. Nothing was added.".into())),
+        Err(replays::ImportProblem::TooBig) => Err(LauncherError::Message("This replay is too big to be one match. Nothing was added.".into())),
+        Err(replays::ImportProblem::Write) => {
+            Err(LauncherError::Message("The replay could not be written to the game's replay folder (Saved\\Demos).".into()))
+        }
+    }
+}
+
 // ------------------------------------------------------------------ entry ---
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1048,6 +1120,7 @@ pub fn run() {
                 show_from_tray_window(&window);
             }
         }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1072,7 +1145,31 @@ pub fn run() {
                 download: downloader,
                 signing_in: Arc::new(Mutex::new(None)),
                 meta: Mutex::new(community::Meta::default()),
+                replay_link: Mutex::new(None),
             });
+
+            // sp-launcher:// links: a reported match's "Open in the launcher"
+            // (replays.rs). Registered with Windows on every start too, not
+            // only by the installer, so a launcher that updated itself or runs
+            // from elsewhere still gets them. One that is running already gets
+            // them from the next launch (single-instance), one that is not
+            // started with it (get_current).
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                #[cfg(windows)]
+                let _ = app.deep_link().register_all();
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        replay_link_opened(&handle, url.as_str());
+                    }
+                });
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    for url in urls {
+                        replay_link_opened(app.handle(), url.as_str());
+                    }
+                }
+            }
 
             // Tray icon: reuses the app's own bundled icon rather than
             // shipping a second asset. "Open" undoes hide_to_tray_window;
@@ -1134,6 +1231,9 @@ pub fn run() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            replay_link,
+            replay_dismiss,
+            replay_import,
             get_config,
             set_config,
             install_state,
