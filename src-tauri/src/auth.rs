@@ -79,15 +79,49 @@ pub struct Profile {
 #[derive(Debug, Clone, Deserialize)]
 struct MeOk {
     profile: Profile,
+    /// Older websites send no `ban`.
+    #[serde(default)]
+    ban: Option<Ban>,
+}
+
+/// What stops this player from playing (sp-website lib/playban.ts): a ban on
+/// the website (the bot's /ban and /tempban) or a suspension or ban of their
+/// game account (the game's admin panel), whichever lasts longer. A ban until
+/// lifted (`permanent`, no `until`) signs the launcher out; a temporary one
+/// stays on the Play page and answers Play. `in_match`: they are in a match
+/// right now, so a running game is closed only once that round is over.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Ban {
+    #[serde(default)]
+    pub reason: String,
+    /// When it was made, epoch ms.
+    #[serde(default)]
+    pub at: i64,
+    /// When it ends, epoch ms; none for a ban until lifted.
+    #[serde(default)]
+    pub until: Option<i64>,
+    #[serde(default)]
+    pub permanent: bool,
+    #[serde(default)]
+    pub in_match: bool,
 }
 
 /// Who the session belongs to now: name, picture and admin rights as the
 /// website sees them today (they change without a new sign-in).
 pub async fn me(session: &str) -> Result<Profile> {
+    Ok(account(session).await?.0)
+}
+
+/// The profile, and what stops them playing if anything does (`Ban`).
+pub async fn account(session: &str) -> Result<(Profile, Option<Ban>)> {
     let url = format!("{}/api/launcher/me", site_url());
     let res = send(client()?.get(url).bearer_auth(session)).await?;
     match res.status().as_u16() {
-        200 => Ok(res.json::<MeOk>().await.map_err(|_| LauncherError::Message(OOPS.into()))?.profile),
+        200 => {
+            let ok = res.json::<MeOk>().await.map_err(|_| LauncherError::Message(OOPS.into()))?;
+            Ok((ok.profile, ok.ban))
+        }
         401 => Err(LauncherError::SignedOut),
         _ => Err(LauncherError::Message(OOPS.into())),
     }
@@ -124,6 +158,9 @@ struct ApiError {
     error: String,
     #[serde(default)]
     until: Option<String>,
+    /// Why a suspension or ban was made (sp-backend /session/discord).
+    #[serde(default)]
+    why: Option<String>,
 }
 
 /// The region the player's matches are in (one of `regions`; every match is in
@@ -283,6 +320,11 @@ pub fn read_connected(url: &str) -> Option<std::result::Result<String, String>> 
         Some(_) => return None,
     };
     let code = query.split('&').find_map(|pair| pair.strip_prefix("code="));
+    // The website refuses a Discord account banned until lifted (sp-website
+    // app/api/auth/discord/callback): say so, not that sign-in failed.
+    if query.split('&').any(|pair| pair == "error=banned") {
+        return Some(Err(BANNED_SIGN_IN.into()));
+    }
     Some(match code {
         Some(code) if !code.is_empty() && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') => Ok(code.to_string()),
         _ => Err(SIGN_IN_FAILED.into()),
@@ -294,6 +336,9 @@ pub fn read_connected(url: &str) -> Option<std::result::Result<String, String>> 
 pub async fn exchange(code: &str, verifier: &str) -> Result<(String, Profile)> {
     let url = format!("{}/api/launcher/token", site_url());
     let res = send(client()?.post(url).json(&serde_json::json!({ "code": code, "verifier": verifier }))).await?;
+    if res.status().as_u16() == 403 {
+        return Err(LauncherError::Message(BANNED_SIGN_IN.into()));
+    }
     if !res.status().is_success() {
         return Err(LauncherError::Message(SIGN_IN_FAILED.into()));
     }
@@ -302,6 +347,8 @@ pub async fn exchange(code: &str, verifier: &str) -> Result<(String, Profile)> {
 }
 
 const SIGN_IN_FAILED: &str = "Oops, the Discord sign-in did not go through. Try again.";
+const BANNED_SIGN_IN: &str = "This Discord account is banned from SUPER PEOPLE. If you think this is a mistake, contact us on Discord.";
+const BANNED: &str = "You are banned from playing. The Play page says why and until when.";
 
 // ----------------------------------------------------------------- terms ---
 // Play needs the Terms of Service and the Privacy Policy accepted, here in the
@@ -372,6 +419,7 @@ pub async fn game_pass(session: &str) -> Result<String> {
         // they changed since this launcher last asked.
         403 => match res.json::<ApiError>().await.unwrap_or_default().error.as_str() {
             "terms" => Err(LauncherError::TermsRequired),
+            "banned" => Err(LauncherError::Message(BANNED.into())),
             _ => Err(LauncherError::Message(OOPS.into())),
         },
         503 => Err(LauncherError::Message(explain("NOT_ENABLED", None))),
@@ -395,7 +443,11 @@ pub async fn discord_launch(pass: &str, device_id: &str, pc: &pcid::Codes) -> Re
     }
     let err: ApiError = serde_json::from_str(&text).unwrap_or_default();
     let code = if err.error.is_empty() { format!("HTTP_{}", status.as_u16()) } else { err.error };
-    Err(LauncherError::Message(explain(&code, err.until.as_deref())))
+    let message = explain(&code, err.until.as_deref());
+    Err(LauncherError::Message(match err.why.as_deref().map(str::trim) {
+        Some(why) if !why.is_empty() && (code == "KEY_SUSPENDED" || code == "KEY_REVOKED") => format!("{message} Reason: {why}"),
+        _ => message,
+    }))
 }
 
 /// Reads the player's in-game name (`name` None) or changes it, with a fresh
@@ -852,6 +904,33 @@ mod tests {
         let res = ipv4_client().unwrap().get(format!("http://localhost:{port}/")).send().await.expect("sent");
         assert_eq!(res.status().as_u16(), 204);
         assert!(peer.await.unwrap().is_ipv4());
+    }
+
+    #[test]
+    fn a_ban_reads_as_the_website_sends_it() {
+        // sp-website app/api/launcher/me: a temporary ban, in a match.
+        let json = r#"{"profile":{"id":"1","name":"P","username":"p"},"banned":true,
+            "ban":{"reason":"griefing","at":1790000000000,"until":1790300000000,"inMatch":true,"permanent":false}}"#;
+        let me: MeOk = serde_json::from_str(json).expect("me");
+        let ban = me.ban.expect("ban");
+        assert_eq!(ban.reason, "griefing");
+        assert_eq!(ban.until, Some(1_790_300_000_000));
+        assert!(ban.in_match && !ban.permanent);
+        // Until lifted: no end.
+        let lifted: Ban = serde_json::from_str(r#"{"reason":"cheating","at":1,"until":null,"inMatch":false,"permanent":true}"#).unwrap();
+        assert!(lifted.permanent && lifted.until.is_none());
+        // An older website: no ban at all.
+        let old: MeOk = serde_json::from_str(r#"{"profile":{"id":"1","name":"P","username":"p"},"banned":false}"#).unwrap();
+        assert!(old.ban.is_none());
+        // The UI gets it in camelCase.
+        assert!(serde_json::to_string(&ban).unwrap().contains("\"inMatch\":true"));
+    }
+
+    #[test]
+    fn a_banned_account_is_told_so_when_signing_in() {
+        let site = site_url();
+        assert_eq!(read_connected(&format!("{site}/launcher/connected?error=banned")), Some(Err(BANNED_SIGN_IN.into())));
+        assert_eq!(read_connected(&format!("{site}/launcher/connected?error=failed")), Some(Err(SIGN_IN_FAILED.into())));
     }
 
     #[test]

@@ -405,6 +405,51 @@ html, body, #root{
 }
 .argbar + .cta{ margin-top:-7px; }
 
+/* ---- a temporary ban (BanNotice.tsx), where the launch arguments usually are ---- */
+.bancard{
+  width: 296px;
+  padding: 9px 11px 10px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--signal);
+  background: rgba(19,19,22,0.92);
+  -webkit-app-region: no-drag;
+}
+.bancard__head{ display:flex; align-items:center; gap:7px; margin-bottom:5px; }
+.bancard__icon{ width:14px; height:14px; color: var(--signal-hi); flex:none; }
+.bancard__title{
+  font-family: var(--font);
+  font-size:14px; font-weight:800;
+  letter-spacing:0.11em; text-transform:uppercase;
+  color: var(--paper);
+}
+.bancard__line{ margin:0; font-size:12px; line-height:1.45; color: var(--paper-dim); }
+.bancard__line b{ color: var(--paper); font-weight:600; }
+.bancard__reason{
+  margin:6px 0 0; padding-top:6px;
+  border-top:1px solid var(--line-soft);
+  font-size:12.5px; line-height:1.45; color: var(--paper);
+  overflow-wrap:anywhere;
+  display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;
+}
+.bancard + .cta{ margin-top:2px; }
+
+.dialog__card.bandialog{ width: min(460px, calc(100% - 40px)); border-left: 3px solid var(--signal); }
+.bandialog__lead{ margin: 0 0 10px; color: var(--paper-dim); }
+.bandialog__facts{
+  display:grid; grid-template-columns: max-content 1fr; gap: 6px 14px;
+  margin: 0 0 12px; padding: 10px 12px;
+  border: 1px solid var(--line-soft); background: rgba(255,255,255,0.025);
+  font-size: 13px; line-height: 1.45;
+}
+.bandialog__facts dt{
+  font-family: var(--font);
+  font-size:11px; font-weight:800;
+  letter-spacing:0.11em; text-transform:uppercase;
+  color: var(--muted); padding-top:2px;
+}
+.bandialog__facts dd{ margin:0; color: var(--paper); }
+.bandialog__reason{ overflow-wrap:anywhere; white-space: pre-wrap; }
+
 .buildline{
   display:flex; align-items:center; gap:9px;
   font-family: var(--font);

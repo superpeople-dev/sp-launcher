@@ -11,6 +11,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { DownloadPanel } from "./components/DownloadPanel";
 import { Welcome } from "./components/Welcome";
 import { TermsDialog } from "./components/TermsDialog";
+import { BanDialog, bannedLine } from "./components/BanNotice";
 import { IdeasPanel } from "./components/community/IdeasPanel";
 import { RoadmapPanel } from "./components/community/RoadmapPanel";
 import { CompletedPanel } from "./components/community/CompletedPanel";
@@ -19,7 +20,7 @@ import { LeaderboardPanel } from "./components/LeaderboardPanel";
 import { activeNews } from "./news";
 import { checkForUpdate, installUpdate } from "./lib/updater";
 import { clearCommunityCache, preloadBoards } from "./lib/community";
-import type { AuthState, Config, GameFiles, HostsStatus, InstallState, NewsItem, Phase, Profile, Tab, Terms } from "./types";
+import type { AuthState, Ban, Config, GameFiles, HostsStatus, InstallState, NewsItem, Phase, Profile, Tab, Terms } from "./types";
 
 // Re-check which items are in their [starts_at, ends_at) window every so
 // often, so an event that just started (or just ended) updates without the
@@ -73,6 +74,11 @@ export default function App() {
   const [terms, setTerms] = useState<Terms | null>(null);
   const [termsOpen, setTermsOpen] = useState(false);
   const [termsNote, setTermsNote] = useState<string | null>(null);
+
+  // A temporary ban (lib.rs ban_status): a card on the Play page, and Play shows
+  // it again (BanDialog). "closed": the launcher closed the game because of it.
+  const [ban, setBan] = useState<Ban | null>(null);
+  const [banDialog, setBanDialog] = useState<"play" | "closed" | null>(null);
 
   const [appVersion, setAppVersion] = useState("");
   const [update, setUpdate] = useState<Update | null>(null);
@@ -192,6 +198,38 @@ export default function App() {
     }
   }, [profileId, loadTerms]);
 
+  // What stops this player from playing, from the website (lib.rs ban_status).
+  // A ban until lifted has already signed the launcher out on the Rust side: back
+  // to the welcome screen, saying why. Offline, what was known last stays.
+  const lastBanCheck = useRef(0);
+  const knownBan = useRef<Ban | null>(null);
+  const checkBan = useCallback(async (): Promise<Ban | null> => {
+    lastBanCheck.current = Date.now();
+    let fresh: Ban | null;
+    try {
+      fresh = await invoke<Ban | null>("ban_status");
+    } catch {
+      return knownBan.current;
+    }
+    knownBan.current = fresh;
+    setBan(fresh);
+    if (!fresh) setBanDialog(null);
+    if (fresh?.permanent) {
+      setProfile(null);
+      setBanDialog(null);
+      setAuthError(bannedLine(fresh));
+    }
+    return fresh;
+  }, []);
+
+  useEffect(() => {
+    if (profileId) void checkBan();
+    else {
+      knownBan.current = null;
+      setBan(null);
+    }
+  }, [profileId, checkBan]);
+
   // Each answer (at start, on focus, after accepting) is the one shown next time.
   useEffect(() => {
     if (profileId && terms) rememberAccepted(profileId, terms.accepted);
@@ -207,6 +245,8 @@ export default function App() {
     void getCurrentWindow()
       .onFocusChanged(({ payload: focused }) => {
         if (focused && Date.now() - lastTermsCheck.current >= 60_000) loadTerms();
+        // A ban made while the launcher sat in the background shows when it comes back.
+        if (focused && Date.now() - lastBanCheck.current >= 60_000) void checkBan();
       })
       .then((unlisten) => {
         if (gone) unlisten();
@@ -216,7 +256,22 @@ export default function App() {
       gone = true;
       off?.();
     };
-  }, [profileId, loadTerms]);
+  }, [profileId, loadTerms, checkBan]);
+
+  // While the game runs, the ban is asked about every minute. A banned player is
+  // left to finish the match they are in; out of it, the launcher closes the game
+  // and says why (their next round is refused by the backend anyway).
+  useEffect(() => {
+    if (!busy || !profileId) return;
+    const id = window.setInterval(() => {
+      void checkBan().then((now) => {
+        if (!now || now.inMatch) return;
+        void invoke("stop_game").catch(() => {});
+        if (!now.permanent) setBanDialog("closed");
+      });
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, [busy, profileId, checkBan]);
 
   // The launcher opens in front of the other windows. After an update the
   // installer starts it from the background, and Windows would otherwise leave
@@ -429,16 +484,24 @@ export default function App() {
     // changed immediately before Play controls this run, not the next one.
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
     saveTimer.current = null;
-    void invoke("set_config", { cfg: config })
-      .then(() => invoke("launch_game", { server: null }))
-      .then(() => invoke<HostsStatus>("hosts_status").then(setHosts))
-      .catch((e) => {
-        setError(String(e));
+    void (async () => {
+      // Banned since the launcher last asked: no game, and the ban says why.
+      const stop = await checkBan();
+      if (stop) {
         setBusy(false);
-      });
+        if (!stop.permanent) setBanDialog("play");
+        return;
+      }
+      await invoke("set_config", { cfg: config });
+      await invoke("launch_game", { server: null });
+      setHosts(await invoke<HostsStatus>("hosts_status"));
+    })().catch((e) => {
+      setError(String(e));
+      setBusy(false);
+    });
     // `busy` is cleared by the game:exited event, not here: the launcher
     // stays in the launched state for as long as the game is up.
-  }, [config]);
+  }, [config, checkBan]);
 
   const stopGame = useCallback(() => {
     void invoke("stop_game").catch((e) => setError(String(e)));
@@ -531,6 +594,8 @@ export default function App() {
             busy={busy}
             locked={!termsAccepted}
             files={files}
+            ban={ban && !ban.permanent ? ban : null}
+            onBanned={() => setBanDialog("play")}
             onVerify={onVerifyFiles}
             onUnlock={() => (terms ? setTermsOpen(true) : loadTerms(true))}
             onLaunchArgs={(launch_args) => patchConfig({ launch_args })}
@@ -606,6 +671,10 @@ export default function App() {
             }
           }}
         />
+      )}
+
+      {profile && ban && !ban.permanent && banDialog && (
+        <BanDialog ban={ban} why={banDialog} onClose={() => setBanDialog(null)} />
       )}
 
       {error && (
