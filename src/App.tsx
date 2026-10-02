@@ -14,6 +14,7 @@ import { TermsDialog } from "./components/TermsDialog";
 import { IdeasPanel } from "./components/community/IdeasPanel";
 import { RoadmapPanel } from "./components/community/RoadmapPanel";
 import { CompletedPanel } from "./components/community/CompletedPanel";
+import { TwitchPanel } from "./components/TwitchPanel";
 import { activeNews } from "./news";
 import { checkForUpdate, installUpdate } from "./lib/updater";
 import { clearCommunityCache, preloadBoards } from "./lib/community";
@@ -518,6 +519,7 @@ export default function App() {
         {profile && tab === "ideas" && <IdeasPanel me={profile} onError={setError} onNotice={setNotice} />}
         {profile && tab === "roadmap" && <RoadmapPanel me={profile} onError={setError} onNotice={setNotice} />}
         {profile && tab === "completed" && <CompletedPanel me={profile} onError={setError} onNotice={setNotice} />}
+        {profile && tab === "twitch" && <TwitchPanel onError={setError} />}
 
         {profile && tab === "play" && (
           <PlayPanel

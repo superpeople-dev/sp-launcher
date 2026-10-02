@@ -65,7 +65,7 @@ export interface HostsStatus {
   conflicts: string[];
 }
 
-export type Tab = "play" | "ideas" | "roadmap" | "completed" | "download" | "settings";
+export type Tab = "play" | "download" | "ideas" | "roadmap" | "completed" | "twitch" | "settings";
 
 /** The signed-in player, from Discord. Mirrors `auth::Profile`. */
 export interface Profile {

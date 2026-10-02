@@ -6,14 +6,15 @@ import type { Profile, Tab } from "../types";
 import { Avatar } from "./community/Avatar";
 import { NameDialog } from "./NameDialog";
 
-// Settings lives in the profile menu, next to Sign out: six tabs do not fit
-// the 860 px window.
+// Settings lives in the profile menu, next to Sign out: the tabs fill the 860 px window (six with
+// short labels leave about 35 px). Download always comes right after Play.
 const TABS: { id: Tab; label: string }[] = [
   { id: "play", label: "Play" },
+  { id: "download", label: "Download" },
   { id: "ideas", label: "Ideas" },
   { id: "roadmap", label: "Roadmap" },
   { id: "completed", label: "Completed" },
-  { id: "download", label: "Download" },
+  { id: "twitch", label: "Twitch" },
 ];
 
 interface Props {
