@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 /** Mirrors `leaderboard::Row`. */
@@ -79,8 +79,9 @@ const countryName = (code: string) => {
 
 /**
  * The Leaderboard page: each mode's top 100 of the season (leaderboard.rs), the mode and view picked
- * above the list, and a search by name that stays when the list changes. Opens on the list with the
- * most ranked players. Players found keep their rank.
+ * above the list, and a search by name that stays when the list changes. Opens on Solo TPP and stays
+ * there until the player picks another list (it used to jump to the busiest list once loaded). Players
+ * found keep their rank.
  */
 export function LeaderboardPanel() {
   const [board, setBoard] = useState<Board | null | undefined>(undefined);
@@ -103,12 +104,7 @@ export function LeaderboardPanel() {
     return () => window.clearInterval(timer);
   }, [load]);
 
-  // The busiest list until the player picks one.
-  const busiest = useMemo(() => {
-    if (!board) return "solo_tpp";
-    return Object.keys(board.lists).reduce((best, k) => (board.lists[k].length > (board.lists[best]?.length ?? -1) ? k : best), "solo_tpp");
-  }, [board]);
-  const current = key ?? busiest;
+  const current = key ?? "solo_tpp";
   const [mode, view] = current.split("_") as [Mode, View];
   const list = board?.lists[current] ?? [];
   const wanted = plain(query.trim());

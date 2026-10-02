@@ -640,7 +640,8 @@
 .leaders{ grid-template-rows: auto auto minmax(0, 1fr); gap: 10px; min-height: 0; }
 .leaders__bar{ display:flex; align-items:center; gap: 8px; }
 .leaders__search{ position: relative; display:flex; align-items:center; margin-left: auto; width: 220px; }
-.leaders__search svg{ position:absolute; left: 9px; width: 13px; height: 13px; color: var(--muted); pointer-events:none; }
+/* z-index: the input's backdrop-filter paints it above an absolutely placed sibling, hiding the icon */
+.leaders__search svg{ position:absolute; left: 9px; z-index: 1; width: 13px; height: 13px; color: var(--muted); pointer-events:none; }
 .leaders__search .input{ padding-left: 28px; height: 30px; }
 .leaders__list{ list-style:none; margin:0; padding:0 4px 0 0; display:flex; flex-direction:column; gap: 5px; overflow-y:auto; overscroll-behavior: contain; min-height:0; }
 .leader{
