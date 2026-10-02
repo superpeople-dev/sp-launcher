@@ -523,13 +523,13 @@ pub fn report(session: String, mut event: serde_json::Value) {
     if let Some(fields) = event.as_object_mut() {
         fields.insert("version".into(), env!("CARGO_PKG_VERSION").into());
     }
-    let launched = event.get("action").and_then(|a| a.as_str()) == Some("game.launched");
+    let with_ip = matches!(event.get("action").and_then(|a| a.as_str()), Some("game.launched" | "launcher.updated"));
     tauri::async_runtime::spawn(async move {
-        // The game start's log line shows the player's IP as the website saw
-        // it. A PC with IPv6 reaches the site over it, so first a check-in
-        // over IPv4 (sp-website app/api/launcher/ipv4): the line then shows
-        // both. No IPv4 route, or an older website: nothing, and on we go.
-        if launched {
+        // The game start's and the update's log lines show the player's IP as
+        // the website saw it. A PC with IPv6 reaches the site over it, so first
+        // a check-in over IPv4 (sp-website app/api/launcher/ipv4): the line then
+        // shows both. No IPv4 route, or an older website: nothing, and on we go.
+        if with_ip {
             if let Ok(v4) = ipv4_client() {
                 let url = format!("{}/api/launcher/ipv4", site_url());
                 let _ = v4.post(url).bearer_auth(&session).timeout(std::time::Duration::from_secs(4)).send().await;

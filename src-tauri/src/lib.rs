@@ -537,7 +537,11 @@ fn note_version(state: &State<'_, AppState>, session: String) {
         before
     };
     if !before.is_empty() {
-        auth::report(session, serde_json::json!({ "action": "launcher.updated", "from": before }));
+        // With the PC it runs on (hardware.rs), as for "Game launched".
+        tauri::async_runtime::spawn(async move {
+            let pc = tauri::async_runtime::spawn_blocking(hardware::summary).await.unwrap_or_default();
+            auth::report(session, serde_json::json!({ "action": "launcher.updated", "from": before, "hardware": pc }));
+        });
     }
 }
 
