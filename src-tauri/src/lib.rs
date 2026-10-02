@@ -130,6 +130,7 @@ fn set_config(state: State<'_, AppState>, cfg: Config) -> Result<()> {
         session_sealed: current.session_sealed.clone(),
         profile: current.profile.clone(),
         device_id: current.device_id.clone(),
+        last_version: current.last_version.clone(),
         auth_key_sealed: current.auth_key_sealed.clone(),
         account_id: current.account_id.clone(),
         display_name: current.display_name.clone(),
@@ -458,6 +459,7 @@ async fn discord_connect(app: AppHandle, state: State<'_, AppState>) -> Result<a
         cfg.profile = Some(profile.clone());
         config::save(&state.config_dir, &cfg)?;
     }
+    note_version(&state, token);
     Ok(profile)
 }
 
@@ -489,12 +491,37 @@ async fn sign_out(state: State<'_, AppState>) -> Result<()> {
 async fn auth_refresh(app: AppHandle, state: State<'_, AppState>) -> Result<Option<auth::Profile>> {
     let Some(session) = session_of(&state)? else { return Ok(None) };
     let profile = auth::me(&session).await.map_err(|e| expired(&app, &state, e))?;
-    let mut cfg = state.config.lock().expect("config mutex");
-    if !cfg.session_sealed.is_empty() {
-        cfg.profile = Some(profile.clone());
-        config::save(&state.config_dir, &cfg)?;
+    {
+        let mut cfg = state.config.lock().expect("config mutex");
+        if !cfg.session_sealed.is_empty() {
+            cfg.profile = Some(profile.clone());
+            config::save(&state.config_dir, &cfg)?;
+        }
     }
+    note_version(&state, session);
     Ok(Some(profile))
+}
+
+/// #launcher-logs: "Launcher updated, v0.9.1 to v0.9.2", once per update, the
+/// first time the new version runs while signed in (the website needs the
+/// session to say who). The first version that knows this only remembers
+/// itself: from an older one, there is nothing to compare with.
+fn note_version(state: &State<'_, AppState>, session: String) {
+    let now = env!("CARGO_PKG_VERSION");
+    let before = {
+        let mut cfg = state.config.lock().expect("config mutex");
+        if cfg.last_version == now {
+            return;
+        }
+        let before = std::mem::replace(&mut cfg.last_version, now.to_string());
+        if config::save(&state.config_dir, &cfg).is_err() {
+            return;
+        }
+        before
+    };
+    if !before.is_empty() {
+        auth::report(session, serde_json::json!({ "action": "launcher.updated", "from": before }));
+    }
 }
 
 // ----------------------------------------------------------------- terms ---
