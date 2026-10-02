@@ -212,6 +212,7 @@ pub fn explain(code: &str) -> String {
         "limit" => "You already have 3 posts waiting for the team's review. Wait until they are reviewed.".into(),
         "invalid" => "That could not be posted. Check its length.".into(),
         "offensive" => "That text was refused. Please keep it friendly.".into(),
+        "english" => "Please write it in English, so the whole team can read it.".into(),
         "off" => "Comments are closed on this item.".into(),
         "forbidden" => "You do not have permission to do that.".into(),
         "missing" => "That comment no longer exists.".into(),
