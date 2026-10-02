@@ -2,7 +2,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { News } from "./News";
 import { LaunchArgs } from "./LaunchArgs";
 import { RegionPicker } from "./RegionPicker";
-import type { GameFiles, NewsItem, Phase } from "../types";
+import { BanCard, bannedNote } from "./BanNotice";
+import type { Ban, GameFiles, NewsItem, Phase } from "../types";
 
 const DISCORD_URL = "https://discord.gg/superpeopleofficial";
 
@@ -15,6 +16,9 @@ interface Props {
   locked: boolean;
   /** Play's check of the game's files: not ok, and Play is Verify files. */
   files: GameFiles | null;
+  /** A temporary ban: its card replaces the launch arguments, and Play shows it again. */
+  ban: Ban | null;
+  onBanned: () => void;
   onVerify: () => void;
   onUnlock: () => void;
   onLaunchArgs: (next: string) => void;
@@ -41,7 +45,7 @@ export function PlayPanel(props: Props) {
 
       <div className="action">
         <div className="action__left">
-          <LaunchArgs value={props.launchArgs} onSave={props.onLaunchArgs} />
+          {props.ban ? <BanCard ban={props.ban} /> : <LaunchArgs value={props.launchArgs} onSave={props.onLaunchArgs} />}
 
           {busy ? (
             <button className="cta cta--stop" type="button" onClick={props.onStop}>
@@ -58,6 +62,21 @@ export function PlayPanel(props: Props) {
                 <span className="cta__label">Get the game</span>
                 <span className="cta__icon">
                   <svg viewBox="0 0 14 14" fill="currentColor"><path d="M3 1.5l9 5.5-9 5.5z" /></svg>
+                </span>
+              </span>
+            </button>
+          ) : props.ban ? (
+            <button className="cta cta--locked" type="button" title="You are banned from playing" onClick={props.onBanned}>
+              <span className="cta__inner">
+                <span className="cta__stack">
+                  <span className="cta__label">Play</span>
+                  <span className="cta__note">{bannedNote(props.ban)}</span>
+                </span>
+                <span className="cta__icon">
+                  <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6">
+                    <circle cx="7" cy="7" r="5.5" />
+                    <path d="M3.1 10.9l7.8-7.8" />
+                  </svg>
                 </span>
               </span>
             </button>

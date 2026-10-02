@@ -18,6 +18,13 @@ Rust backend. Windows only.
   short-lived login ticket, handed to the game through the environment
   (`SP_AUTH_TICKET`), never on the command line (`src-tauri/src/auth.rs`).
   Launcher keys are retired; a player who had one keeps their account.
+- **Bans.** The website says what stops a player from playing (a ban there, or
+  one on their game account from the admin panel). A ban until lifted signs the
+  launcher out and the welcome screen says why. A temporary one (the bot's
+  `/tempban`) shows a card on the Play page with its end and reason, and Play
+  opens the same in a popup. While the game runs the launcher asks every
+  minute; a banned player finishes the match they are in, then the launcher
+  closes the game and says why (`src/components/BanNotice.tsx`, `ban_status`).
 - **Ideas, Roadmap, Completed.** The website's boards inside the launcher:
   vote, read and write comments, suggest ideas and report bugs as the
   signed-in Discord account (`src-tauri/src/community.rs`,

@@ -197,3 +197,15 @@ export interface NewsItem {
   /** Only meaningful when `clickable` is true. */
   url?: string | null;
 }
+
+/** What stops this player from playing (lib.rs ban_status, sp-website /api/launcher/me). */
+export interface Ban {
+  reason: string;
+  /** When it was made, epoch ms. */
+  at: number;
+  /** When it ends, epoch ms; null for a ban until lifted (`permanent`), which signs the launcher out. */
+  until: number | null;
+  permanent: boolean;
+  /** In a match right now: a running game is closed once that round is over. */
+  inMatch: boolean;
+}

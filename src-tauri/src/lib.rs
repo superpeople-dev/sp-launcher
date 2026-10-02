@@ -502,6 +502,23 @@ async fn auth_refresh(app: AppHandle, state: State<'_, AppState>) -> Result<Opti
     Ok(Some(profile))
 }
 
+/// Whether the signed-in player may play, from the website (auth.rs `Ban`).
+/// None: they may. A ban until lifted signs the launcher out here and now (the
+/// website will not let them sign in again); the UI shows why on the welcome
+/// screen. A temporary ban stays on the Play page. Called when the launcher
+/// opens, when it comes back to the front, before Play, and every minute while
+/// the game runs: the UI closes a game whose player is banned once they are
+/// out of their match.
+#[tauri::command]
+async fn ban_status(app: AppHandle, state: State<'_, AppState>) -> Result<Option<auth::Ban>> {
+    let Some(session) = session_of(&state)? else { return Ok(None) };
+    let (_, ban) = auth::account(&session).await.map_err(|e| expired(&app, &state, e))?;
+    if ban.as_ref().is_some_and(|b| b.permanent) {
+        forget_sign_in(&state)?;
+    }
+    Ok(ban)
+}
+
 /// #launcher-logs: "Launcher updated, v0.9.1 to v0.9.2", once per update, the
 /// first time the new version runs while signed in (the website needs the
 /// session to say who). The first version that knows this only remembers
@@ -1137,6 +1154,7 @@ pub fn run() {
             community_comments_off,
             community_delete_comment,
             auth_refresh,
+            ban_status,
             launcher_terms,
             accept_terms,
             community_vote,
