@@ -53,6 +53,9 @@ pub struct Config {
     /// Identifies this installation to the backend. A label, not a secret --
     /// generated once, then left alone.
     pub device_id: String,
+    /// The launcher version that last told the team it runs (#launcher-logs,
+    /// "Launcher updated"). Empty until the first start while signed in.
+    pub last_version: String,
 
     // --- launcher keys, retired --------------------------------------------
     /// What a launcher key sign-in left behind; cleared when Discord is
@@ -82,6 +85,7 @@ impl Default for Config {
             profile: None,
             auth_key_sealed: String::new(),
             device_id: String::new(),
+            last_version: String::new(),
             account_id: String::new(),
             display_name: String::new(),
             key_status: String::new(),

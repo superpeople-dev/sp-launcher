@@ -19,6 +19,8 @@ export interface Config {
   profile: Profile | null;
   /** Identifies this installation; a label, not a secret. */
   device_id: string;
+  /** The version that last reported itself to the team (#launcher-logs). */
+  last_version: string;
   /** Left by a retired launcher key sign-in. */
   auth_key_sealed: string;
   account_id: string;
