@@ -12,6 +12,10 @@
 //! A report the site read and refused is deleted; one it could not take now
 //! (offline, signed out, too many in an hour) waits for the next pass. After a
 //! week the game itself no longer takes a report, so neither do we.
+//!
+//! Before a report goes, the replay of its match is uploaded and the report
+//! links it (replays.rs). A report made during a match waits for the match to
+//! end, so the staff get the whole of it.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,19 +61,21 @@ enum Outcome {
 }
 
 /// Sends every waiting report, oldest first, and stops at the first one that
-/// has to wait. Returns how many went.
-pub async fn send_pending(session: &str, dir: &Path) -> usize {
-    send_all(&format!("{}/api/launcher/report", crate::auth::site_url()), session, dir, &SENDING).await
+/// has to wait. `running`: the game is still up, so a report may wait for its
+/// match to end. Returns how many went.
+pub async fn send_pending(session: &str, dir: &Path, running: bool) -> usize {
+    let ctx = crate::replays::Ctx::live(running);
+    send_all(&format!("{}/api/launcher/report", crate::auth::site_url()), session, dir, &SENDING, &ctx).await
 }
 
-async fn send_all(url: &str, session: &str, dir: &Path, busy: &AtomicBool) -> usize {
+async fn send_all(url: &str, session: &str, dir: &Path, busy: &AtomicBool, ctx: &crate::replays::Ctx) -> usize {
     if busy.swap(true, Ordering::AcqRel) {
         return 0;
     }
     let mut sent = 0;
     if let Ok(client) = crate::auth::client() {
         for file in pending(dir) {
-            match send_one(&client, url, session, &file).await {
+            match send_one(&client, url, session, &file, ctx).await {
                 Outcome::Sent => {
                     sent += 1;
                     let _ = std::fs::remove_file(&file);
@@ -85,7 +91,29 @@ async fn send_all(url: &str, session: &str, dir: &Path, busy: &AtomicBool) -> us
     sent
 }
 
-async fn send_one(client: &reqwest::Client, url: &str, session: &str, file: &Path) -> Outcome {
+/// When the report was made: the DLL names the file after it
+/// (`report-<unix ms>-<pid>-<n>.json`), else the file's own time.
+fn made_at(file: &Path, meta: &std::fs::Metadata) -> u64 {
+    file.file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_prefix("report-"))
+        .and_then(|s| s.split('-').next())
+        .and_then(|n| n.parse::<u64>().ok())
+        .filter(|&n| n > 1_000_000_000_000)
+        .or_else(|| meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64))
+        .unwrap_or(0)
+}
+
+/// The report as it is now (its replay found or given up on), so the next
+/// pass does not look again.
+fn keep(file: &Path, report: &serde_json::Value) {
+    let part = file.with_extension("json.part");
+    if std::fs::write(&part, report.to_string()).is_ok() {
+        let _ = std::fs::rename(&part, file);
+    }
+}
+
+async fn send_one(client: &reqwest::Client, url: &str, session: &str, file: &Path, ctx: &crate::replays::Ctx) -> Outcome {
     let Ok(meta) = std::fs::metadata(file) else { return Outcome::Dropped };
     let old = meta
         .modified()
@@ -101,6 +129,15 @@ async fn send_one(client: &reqwest::Client, url: &str, session: &str, file: &Pat
         return Outcome::Dropped;
     }
     let mut report = report;
+    if let (Some(fields), Some(reports)) = (report.as_object_mut(), file.parent()) {
+        let had = fields.len();
+        if crate::replays::attach(ctx, session, reports, fields, made_at(file, &meta)).await == crate::replays::Step::Wait {
+            return Outcome::Later;
+        }
+        if fields.len() != had {
+            keep(file, &report);
+        }
+    }
     if let Some(fields) = report.as_object_mut() {
         fields.insert("version".into(), env!("CARGO_PKG_VERSION").into());
     }
@@ -163,6 +200,127 @@ mod tests {
         path
     }
 
+    /// No Demos folder: every report goes without a replay, asking nobody for one.
+    fn no_replays() -> crate::replays::Ctx {
+        crate::replays::Ctx { demos: None, site: "http://127.0.0.1:9".into(), backend: "http://127.0.0.1:9".into(), running: false }
+    }
+
+    /// One request as a test server saw it: the request line and headers, and the body.
+    struct Seen {
+        head: String,
+        body: Vec<u8>,
+    }
+
+    /// A server that answers each request with the next (status, JSON body), and
+    /// hands back what it was sent, bodies whole (a zip is bigger than one read).
+    async fn server(replies: Vec<(u16, &'static str)>) -> (String, tokio::task::JoinHandle<Vec<Seen>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let task = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for (status, body) in replies {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut got = Vec::new();
+                let mut buf = vec![0u8; 65536];
+                let (head, length) = loop {
+                    let n = sock.read(&mut buf).await.unwrap();
+                    got.extend_from_slice(&buf[..n]);
+                    if let Some(end) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&got[..end]).to_string();
+                        let length = head
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length: ").map(|v| v.trim().parse::<usize>().unwrap()))
+                            .unwrap_or(0);
+                        got.drain(..end + 4);
+                        break (head, length);
+                    }
+                };
+                while got.len() < length {
+                    let n = sock.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    got.extend_from_slice(&buf[..n]);
+                }
+                seen.push(Seen { head, body: got });
+                let reply = format!("HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let _ = sock.write_all(reply.as_bytes()).await;
+            }
+            seen
+        });
+        (base, task)
+    }
+
+    /// The game's recording of a match that ran from `start` for 20 minutes, over.
+    fn match_recording(demos: &Path, name: &str, start: u64, live: bool) {
+        let dir = demos.join(name);
+        std::fs::create_dir_all(dir.join("checkpoints")).unwrap();
+        std::fs::write(dir.join("MK3D.demo"), vec![3u8; 100_000]).unwrap();
+        std::fs::write(dir.join("checkpoints").join("checkpoint0"), b"c").unwrap();
+        let json = format!(r#"{{"LengthInMS": 1200000, "Timestamp": {start}, "bIsLive": {live}, "RecordUserId": "{ME}"}}"#);
+        let mut info = ((json.len() + 1) as i32).to_le_bytes().to_vec();
+        info.extend_from_slice(json.as_bytes());
+        info.push(0);
+        std::fs::write(dir.join("MK3D.replayinfo"), info).unwrap();
+        if !live {
+            std::fs::write(dir.join("MK3D.final"), b"").unwrap();
+        }
+    }
+
+    const ME: &str = "f5a441e76deab1b92db6074e0d6ab07c";
+
+    #[tokio::test]
+    async fn the_replay_of_the_reported_match_goes_up_once_and_each_report_links_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let demos = tempfile::tempdir().unwrap();
+        let start = 1_790_900_000_000u64;
+        match_recording(demos.path(), "kapi_2026-10-01_20-25", start, false);
+        let body = format!(r#"{{"v":1,"reason":1,"replay":"{ME}_r__103_2026-10-02_00_37_03.7z"}}"#);
+        report(dir.path(), &format!("report-{}-1-1.json", start + 5 * 60_000), &body);
+        report(dir.path(), &format!("report-{}-1-2.json", start + 9 * 60_000), &body);
+        let (base, server) = server(vec![
+            (200, r#"{"pass":"pass-1"}"#),
+            (200, r#"{"ok":true,"id":"ab","url":"https://admin.superpeople.dev/replay/abababababababababababababababab","bytes":4321}"#),
+            (204, ""),
+            (204, ""),
+        ])
+        .await;
+        let ctx = crate::replays::Ctx {
+            demos: Some(demos.path().to_path_buf()),
+            site: base.clone(),
+            backend: format!("{base}/launcher/api"),
+            running: false,
+        };
+        let url = format!("{base}/api/launcher/report");
+        assert_eq!(send_all(&url, "session-token", dir.path(), &AtomicBool::new(false), &ctx).await, 2);
+        let seen = server.await.unwrap();
+        assert!(seen[0].head.starts_with("POST /api/launcher/pass ") && seen[0].head.to_ascii_lowercase().contains("authorization: bearer session-token"));
+        let upload = seen[1].head.to_ascii_lowercase();
+        assert!(seen[1].head.starts_with("POST /launcher/api/replays "), "{}", seen[1].head);
+        assert!(upload.contains("x-sp-pass: pass-1") && upload.contains("x-sp-replay: kapi_2026-10-01_20-25") && upload.contains("content-type: application/zip"));
+        assert!(seen[1].body.starts_with(b"PK\x03\x04") && seen[1].body.len() < 100_000, "the recording, zipped");
+        for report in &seen[2..] {
+            let text = String::from_utf8_lossy(&report.body);
+            assert!(report.head.starts_with("POST /api/launcher/report "));
+            assert!(text.contains(r#""replay_url":"https://admin.superpeople.dev/replay/abababababababababababababababab""#), "{text}");
+            assert!(text.contains(r#""replay_bytes":4321"#) && text.contains(r#""replay_match":"kapi_2026-10-01_20-25""#), "{text}");
+        }
+        assert_eq!(seen.len(), 4, "the second report of that match did not upload it again");
+    }
+
+    #[tokio::test]
+    async fn a_report_made_during_a_match_waits_for_it_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let demos = tempfile::tempdir().unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        match_recording(demos.path(), "kapi_now", now - 5 * 60_000, true);
+        let file = report(dir.path(), &format!("report-{}-1-1.json", now - 60_000), r#"{"v":1}"#);
+        let ctx = crate::replays::Ctx { demos: Some(demos.path().to_path_buf()), site: "http://127.0.0.1:9".into(), backend: "http://127.0.0.1:9".into(), running: true };
+        // Nobody listens: had it asked anyone, it would have been told nothing.
+        assert_eq!(send_all("http://127.0.0.1:9/x", "s", dir.path(), &AtomicBool::new(false), &ctx).await, 0);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), r#"{"v":1}"#, "untouched until the match is over");
+    }
+
     #[tokio::test]
     async fn reports_go_oldest_first_with_the_session_and_leave_once_taken() {
         let dir = tempfile::tempdir().unwrap();
@@ -170,11 +328,12 @@ mod tests {
         let first = report(dir.path(), "report-1700000000001-1-1.json", r#"{"v":1,"reason":1}"#);
         let writing = report(dir.path(), "report-1700000000003-1-3.part", r#"{"v":1"#);
         let (url, server) = site(vec![204, 200]).await;
-        assert_eq!(send_all(&url, "session-token", dir.path(), &AtomicBool::new(false)).await, 2);
+        assert_eq!(send_all(&url, "session-token", dir.path(), &AtomicBool::new(false), &no_replays()).await, 2);
         let seen = server.await.unwrap();
         assert!(seen[0].contains(r#""reason":1"#) && seen[1].contains(r#""reason":2"#), "{seen:?}");
         assert!(seen.iter().all(|r| r.contains("authorization: Bearer session-token") || r.contains("Authorization: Bearer session-token")));
         assert!(seen[0].contains(r#""version":""#), "the launcher's version goes along");
+        assert!(seen[0].contains(r#""replay_note":"missing""#), "no recording of the match: the report says so");
         assert!(!first.exists() && !second.exists());
         assert!(writing.exists(), "a report still being written is left alone");
     }
@@ -187,14 +346,14 @@ mod tests {
         let after = report(dir.path(), "report-3-1-3.json", r#"{"v":1}"#);
         // 400: refused, deleted. 429: too many this hour, kept, and the pass stops.
         let (url, server) = site(vec![400, 429]).await;
-        assert_eq!(send_all(&url, "s", dir.path(), &AtomicBool::new(false)).await, 0);
+        assert_eq!(send_all(&url, "s", dir.path(), &AtomicBool::new(false), &no_replays()).await, 0);
         assert_eq!(server.await.unwrap().len(), 2);
         assert!(!refused.exists());
         assert!(waiting.exists() && after.exists());
 
         // Signed out (401) or the site down: still kept.
         let (url, server) = site(vec![401]).await;
-        assert_eq!(send_all(&url, "s", dir.path(), &AtomicBool::new(false)).await, 0);
+        assert_eq!(send_all(&url, "s", dir.path(), &AtomicBool::new(false), &no_replays()).await, 0);
         server.await.unwrap();
         assert!(waiting.exists() && after.exists());
     }
@@ -205,7 +364,7 @@ mod tests {
         let kept = report(dir.path(), "report-1-1-1.json", r#"{"v":1}"#);
         // Nothing listens on this port once the listener is gone.
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        assert_eq!(send_all(&format!("http://127.0.0.1:{port}/x"), "s", dir.path(), &AtomicBool::new(false)).await, 0);
+        assert_eq!(send_all(&format!("http://127.0.0.1:{port}/x"), "s", dir.path(), &AtomicBool::new(false), &no_replays()).await, 0);
         assert!(kept.exists());
     }
 
@@ -216,7 +375,7 @@ mod tests {
         let list = report(dir.path(), "report-2-1-2.json", "[1,2]");
         let huge = report(dir.path(), "report-3-1-3.json", &format!(r#"{{"v":"{}"}}"#, "x".repeat(40_000)));
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        assert_eq!(send_all(&format!("http://127.0.0.1:{port}/x"), "s", dir.path(), &AtomicBool::new(false)).await, 0);
+        assert_eq!(send_all(&format!("http://127.0.0.1:{port}/x"), "s", dir.path(), &AtomicBool::new(false), &no_replays()).await, 0);
         assert!(!broken.exists() && !list.exists() && !huge.exists());
     }
 
