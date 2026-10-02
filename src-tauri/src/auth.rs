@@ -126,6 +126,15 @@ struct ApiError {
     until: Option<String>,
 }
 
+/// The region the player's matches are in ("any", or one of `regions`), and
+/// the regions with servers now with how many each (`game_region`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct GameRegion {
+    pub region: String,
+    #[serde(default)]
+    pub regions: std::collections::BTreeMap<String, u32>,
+}
+
 /// The player's in-game name, and when they may change it next: an ISO time,
 /// or None when they may change it now (`game_name`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -172,6 +181,8 @@ pub fn explain(code: &str, until: Option<&str>) -> String {
         "NAME_SAME" => "That's already your name.".into(),
         "NAME_COOLDOWN" => "You can change your name once every 14 days.".into(),
         "NO_CHARACTER" => "You don't have a character yet. Press Play once to create it, then you can change its name here.".into(),
+        // Picking the region (`game_region`).
+        "REGION_UNAVAILABLE" => "That region has no servers right now. Pick another one.".into(),
         "" => OOPS.into(),
         other if other.starts_with("HTTP_") => OOPS.into(),
         other => format!("Oops, something went wrong ({other}). Try again in a moment."),
@@ -403,6 +414,32 @@ pub async fn game_name(session: &str, name: Option<&str>) -> Result<GameName> {
     // A backend from before the route: a 404 without a code of ours.
     if status.as_u16() == 404 && err.error.is_empty() {
         return Err(LauncherError::Message("The game server can't change names yet. Try again later.".into()));
+    }
+    let code = if err.error.is_empty() { format!("HTTP_{}", status.as_u16()) } else { err.error };
+    Err(LauncherError::Message(explain(&code, err.until.as_deref())))
+}
+
+/// Reads the region the player's matches are in (`region` None) or picks one
+/// ("any" or a region with servers), with a fresh game pass: the backend
+/// (routes/launcher.js POST /account/region) keeps it for that Discord
+/// account, and a party plays where its leader picked.
+pub async fn game_region(session: &str, region: Option<&str>) -> Result<GameRegion> {
+    let pass = game_pass(session).await?;
+    let url = format!("{AUTH_BASE_URL}/account/region");
+    let body = match region {
+        Some(region) => serde_json::json!({ "pass": pass, "region": region }),
+        None => serde_json::json!({ "pass": pass }),
+    };
+    let res = send(client()?.post(url).json(&body)).await?;
+    let status = res.status();
+    let text = res.text().await.unwrap_or_default();
+    if status.is_success() {
+        return serde_json::from_str(&text).map_err(|_| LauncherError::Message(OOPS.into()));
+    }
+    let err: ApiError = serde_json::from_str(&text).unwrap_or_default();
+    // A backend from before regions: no regions, so the picker stays hidden.
+    if status.as_u16() == 404 && err.error.is_empty() {
+        return Ok(GameRegion { region: "any".into(), regions: Default::default() });
     }
     let code = if err.error.is_empty() { format!("HTTP_{}", status.as_u16()) } else { err.error };
     Err(LauncherError::Message(explain(&code, err.until.as_deref())))
@@ -770,6 +807,14 @@ mod tests {
         }
         let read: GameName = serde_json::from_str(r#"{"ok":true,"name":"Neo","next_change_at":null}"#).unwrap();
         assert_eq!(read, GameName { name: "Neo".into(), next_change_at: None });
+    }
+
+    #[test]
+    fn the_region_answer_reads_and_a_refusal_is_a_sentence() {
+        let got: GameRegion = serde_json::from_str(r#"{"ok":true,"region":"asia","regions":{"europe":2,"asia":1}}"#).unwrap();
+        assert_eq!(got.region, "asia");
+        assert_eq!(got.regions.get("europe"), Some(&2));
+        assert!(explain("REGION_UNAVAILABLE", None).contains("no servers"));
     }
 
     #[test]

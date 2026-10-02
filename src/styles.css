@@ -574,6 +574,17 @@ html, body, #root{
 }
 
 /* ---- Discord, bottom-right ---- */
+/* the region picker, between Play and the Discord link (RegionPicker.tsx) */
+.region{ display:flex; flex-direction:column; align-items:flex-end; gap:5px; margin-left:auto; -webkit-app-region:no-drag; }
+.region__label{
+  font-family: var(--font);
+  font-size:10.5px; font-weight:800;
+  letter-spacing:0.12em; text-transform:uppercase;
+  color: var(--muted);
+}
+.region .seg__btn{ height: 30px; }
+.region .seg__btn:disabled{ cursor: default; opacity: 0.6; }
+
 .social{
   display:flex; align-items:center; gap:9px;
   text-decoration:none; color:inherit;

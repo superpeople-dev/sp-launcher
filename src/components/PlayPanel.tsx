@@ -1,6 +1,7 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { News } from "./News";
 import { LaunchArgs } from "./LaunchArgs";
+import { RegionPicker } from "./RegionPicker";
 import type { GameFiles, NewsItem, Phase } from "../types";
 
 const DISCORD_URL = "https://discord.gg/superpeopleofficial";
@@ -105,6 +106,8 @@ export function PlayPanel(props: Props) {
             </button>
           )}
         </div>
+
+        <RegionPicker onError={props.onError} />
 
         {/* opener plugin hands the URL to the default browser, not the webview.
             The href stays as a fallback for middle-click/"open in new tab", but
