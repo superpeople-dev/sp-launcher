@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import logo from "../assets/sp-logo.png";
@@ -9,7 +9,51 @@ import { NameDialog } from "./NameDialog";
 // The pages, grouped so the 860 px window holds as many as needed: Play and Download are one
 // click away (Download always right after Play), the others sit in sections whose list opens below
 // them on hover or click. Settings lives in the profile menu, next to Sign out.
-type Page = { id: Tab; label: string; hint: string };
+type Page = { id: Tab; label: string; hint: string; icon?: ReactNode };
+
+// A section page's icon: 24-unit line drawings like the profile menu's, in the text colour.
+const icon = (paths: ReactNode) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    {paths}
+  </svg>
+);
+const ICONS = {
+  // A light bulb: ideas and bug reports.
+  ideas: icon(
+    <>
+      <path d="M9 18h6M10 21h4" />
+      <path d="M12 3a6 6 0 0 0-3.6 10.8c.7.5 1.1 1.3 1.1 2.1V16h5v-.1c0-.8.4-1.6 1.1-2.1A6 6 0 0 0 12 3z" />
+    </>,
+  ),
+  // A folded map with its route: what the team is working on.
+  roadmap: icon(
+    <>
+      <path d="M9 4L3 6.5v13.5l6-2.5 6 2.5 6-2.5V4l-6 2.5L9 4z" />
+      <path d="M9 4v13.5M15 6.5V20" />
+    </>,
+  ),
+  // A tick in a circle: what was finished.
+  completed: icon(
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M8 12.5l2.8 2.8L16 9.8" />
+    </>,
+  ),
+  // A cup: the season's top 100.
+  leaderboard: icon(
+    <>
+      <path d="M7 4h10v5a5 5 0 0 1-10 0V4z" />
+      <path d="M7 6H4v1.5A3.5 3.5 0 0 0 7.5 11M17 6h3v1.5A3.5 3.5 0 0 1 16.5 11M12 14v4M8 21h8M9.5 18h5" />
+    </>,
+  ),
+  // Twitch's speech-bubble mark.
+  twitch: icon(
+    <>
+      <path d="M5 3L3.5 6.5V19H8v2.5l2.5-2.5h3.5l5.5-5.5V3H5z" />
+      <path d="M11 8v4.5M15.5 8v4.5" />
+    </>,
+  ),
+};
 type Section = { label: string; pages: Page[] };
 const SECTIONS: Section[] = [
   { label: "Play", pages: [{ id: "play", label: "Play", hint: "" }] },
@@ -17,16 +61,16 @@ const SECTIONS: Section[] = [
   {
     label: "Community",
     pages: [
-      { id: "ideas", label: "Ideas", hint: "Vote on ideas and bug reports, or post your own" },
-      { id: "roadmap", label: "Roadmap", hint: "What the team is working on" },
-      { id: "completed", label: "Completed", hint: "What was finished lately" },
+      { id: "ideas", label: "Ideas", hint: "Vote on ideas and bug reports, or post your own", icon: ICONS.ideas },
+      { id: "roadmap", label: "Roadmap", hint: "What the team is working on", icon: ICONS.roadmap },
+      { id: "completed", label: "Completed", hint: "What was finished lately", icon: ICONS.completed },
     ],
   },
   {
     label: "Players",
     pages: [
-      { id: "leaderboard", label: "Leaderboard", hint: "The season's top 100 of each mode" },
-      { id: "twitch", label: "Twitch", hint: "The most popular SUPER PEOPLE streams, live" },
+      { id: "leaderboard", label: "Leaderboard", hint: "The season's top 100 of each mode", icon: ICONS.leaderboard },
+      { id: "twitch", label: "Twitch", hint: "The most popular SUPER PEOPLE streams, live", icon: ICONS.twitch },
     ],
   },
 ];
@@ -167,8 +211,11 @@ function SectionMenu({ section, tab, onTab }: { section: Section; tab: Tab; onTa
                 onTab(p.id);
               }}
             >
-              <span className="section__name">{p.label}</span>
-              <span className="section__hint">{p.hint}</span>
+              <span className="section__icon">{p.icon}</span>
+              <span className="section__text">
+                <span className="section__name">{p.label}</span>
+                <span className="section__hint">{p.hint}</span>
+              </span>
             </button>
           ))}
         </div>
