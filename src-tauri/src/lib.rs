@@ -12,6 +12,7 @@ mod game;
 mod hardware;
 mod integrity;
 mod pcid;
+mod reports;
 mod shim;
 mod startup_images;
 mod gateway;
@@ -670,6 +671,13 @@ async fn launch_game(
     if let Some(startup) = &fixes_startup {
         env.extend(startup.environment());
     }
+    // The game's Report button (reports.rs): the client fixes DLL writes each
+    // report into this folder, and the launcher sends it to the staff. Without
+    // client fixes nothing writes there, so no folder is named.
+    let reports_dir = if cfg.client_fixes_enabled { reports::prepare(&config_dir) } else { None };
+    if let Some(dir) = &reports_dir {
+        env.push((reports::ENV.into(), dir.display().to_string()));
+    }
 
     engine_ini::apply()?;
 
@@ -721,6 +729,23 @@ async fn launch_game(
     }
     *state.running_pid.lock().expect("pid mutex") = Some(pid);
     state.discord.set(discord::State::InGame);
+
+    // Reports made with the game's Report button go to the staff (reports.rs):
+    // every few seconds while this game runs, and once more after it closes.
+    if let Some(dir) = reports_dir {
+        let running_pid = state.running_pid.clone();
+        let session = session.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(reports::EVERY).await;
+                let closed = running_pid.lock().map(|running| *running != Some(pid)).unwrap_or(true);
+                reports::send_pending(&session, &dir).await;
+                if closed {
+                    break;
+                }
+            }
+        });
+    }
 
     // #launcher-logs: who started the game, on what PC (hardware.rs).
     tauri::async_runtime::spawn(async move {

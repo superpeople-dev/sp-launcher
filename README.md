@@ -22,6 +22,13 @@ Rust backend. Windows only.
   vote, read and write comments, suggest ideas and report bugs as the
   signed-in Discord account (`src-tauri/src/community.rs`,
   `src/components/community/`).
+- **In-game reports.** The game's own Report button (death cam, spectating)
+  reaches the staff. With Client fixes on, the DLL writes each report into the
+  launcher's `reports` folder (named to the game in `SP_REPORT_DIR`); while the
+  game runs, the launcher sends it to superpeople.dev as the signed-in
+  account, and the site posts it to the staff's Discord channel. A report the
+  site cannot take yet waits for the next pass; after a week it is dropped
+  (`src-tauri/src/reports.rs`).
 - **One game folder.** The Settings tab and the Download tab share a single
   "Game folder": pick a folder that already has the game, or download into it.
 - **Download tab.** Downloads the game's files (about 455 files, 30.7 GB)
