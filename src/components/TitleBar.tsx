@@ -348,7 +348,14 @@ function ServerPill() {
 
   if (!st) return null;
   return (
-    <div className={`srvpill${st.online ? " is-online" : " is-offline"}`} title={st.online ? "Backend online" : "Backend offline"}>
+    <div
+      className={`srvpill${st.online ? " is-online" : " is-offline"}`}
+      title={
+        st.online
+          ? "The game server is online"
+          : "The launcher can't reach the game server. If this stays, a VPN, firewall or antivirus may be blocking it: try without them, or on another network."
+      }
+    >
       <span className="srvpill__dot" />
       <span className="srvpill__text">{st.online ? `${st.players} playing` : "Offline"}</span>
     </div>

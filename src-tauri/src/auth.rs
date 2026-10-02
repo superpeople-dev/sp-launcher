@@ -195,6 +195,19 @@ pub struct Ticket {
 /// HTTP status or an error page.
 pub const OOPS: &str = "Oops, something went wrong. Try again in a moment.";
 
+/// What a bare HTTP error from `who` (the game server, the website) says to a
+/// player: the status, and what to try. A 5xx is the server's own trouble; any
+/// other status usually means something on the way blocked or answered for it.
+pub fn http_error(who: &str, status: &str) -> String {
+    if status.starts_with('5') {
+        format!("The {who} had a problem (HTTP {status}). Try again in a moment; if it keeps happening, ask in Discord.")
+    } else {
+        format!(
+            "The {who} answered with an error (HTTP {status}). A VPN, firewall or antivirus may be blocking it: try without them, or on another network. If it keeps happening, ask in Discord."
+        )
+    }
+}
+
 /// Turns a backend error code into something a player can act on. The codes
 /// are shared with the backend (routes/launcher.js); an unknown one is kept in
 /// brackets for whoever helps them, a bare HTTP status is not.
@@ -222,7 +235,11 @@ pub fn explain(code: &str, until: Option<&str>) -> String {
         // Picking the region (`game_region`).
         "REGION_UNAVAILABLE" => "That region has no servers right now. Pick another one.".into(),
         "" => OOPS.into(),
-        other if other.starts_with("HTTP_") => OOPS.into(),
+        // A bare HTTP status: the game backend sent an error page, or something
+        // between this PC and the server answered in its place (a VPN, a
+        // firewall, an antivirus web shield). The status is shown, so whoever
+        // helps the player can tell which.
+        other if other.starts_with("HTTP_") => http_error("game server", &other[5..]),
         other => format!("Oops, something went wrong ({other}). Try again in a moment."),
     }
 }
@@ -420,10 +437,11 @@ pub async fn game_pass(session: &str) -> Result<String> {
         403 => match res.json::<ApiError>().await.unwrap_or_default().error.as_str() {
             "terms" => Err(LauncherError::TermsRequired),
             "banned" => Err(LauncherError::Message(BANNED.into())),
-            _ => Err(LauncherError::Message(OOPS.into())),
+            "" => Err(LauncherError::Message(http_error("website", "403"))),
+            other => Err(LauncherError::Message(format!("The website did not let you play ({other}). Try again in a moment, or ask in Discord."))),
         },
         503 => Err(LauncherError::Message(explain("NOT_ENABLED", None))),
-        _ => Err(LauncherError::Message(OOPS.into())),
+        other => Err(LauncherError::Message(http_error("website", &other.to_string()))),
     }
 }
 
@@ -845,9 +863,13 @@ mod tests {
         assert!(explain("PC_ID_REQUIRED", None).contains("Restart the launcher"));
         // An unfamiliar code must still be visible, not swallowed.
         assert!(explain("SOME_NEW_CODE", None).contains("SOME_NEW_CODE"));
-        // A bare HTTP status (an error page, a missing route) is never shown.
-        assert_eq!(explain("HTTP_404", None), OOPS);
-        assert!(!explain("HTTP_502", None).contains("502"));
+        // A bare HTTP status (an error page, something answering for the server)
+        // says which, and what to try, instead of a plain "Oops".
+        let blocked = explain("HTTP_403", None);
+        assert!(blocked.contains("HTTP 403") && blocked.contains("VPN") && blocked != OOPS, "{blocked}");
+        let down = explain("HTTP_502", None);
+        assert!(down.contains("HTTP 502") && down.contains("had a problem") && !down.contains("VPN"), "{down}");
+        assert!(http_error("website", "500").starts_with("The website had a problem"));
     }
 
     #[test]
