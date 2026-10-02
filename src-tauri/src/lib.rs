@@ -354,6 +354,14 @@ async fn leaderboard() -> Result<Option<leaderboard::Board>> {
     leaderboard::load().await
 }
 
+/// The region the player's matches are in, and the regions with servers now;
+/// with `region`, picks it (auth::game_region).
+#[tauri::command]
+async fn account_region(app: AppHandle, state: State<'_, AppState>, region: Option<String>) -> Result<auth::GameRegion> {
+    let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
+    auth::game_region(&session, region.as_deref()).await.map_err(|e| expired(&app, &state, e))
+}
+
 /// Who is live on Twitch in the SUPER PEOPLE category (twitch.rs).
 #[tauri::command]
 async fn twitch_streams() -> Result<twitch::Streams> {
@@ -1086,6 +1094,7 @@ pub fn run() {
             stop_game,
             auth_status,
             account_name,
+            account_region,
             discord_connect,
             discord_cancel,
             sign_out,
