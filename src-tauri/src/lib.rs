@@ -12,6 +12,7 @@ mod game;
 mod hardware;
 mod integrity;
 mod pcid;
+mod replays;
 mod reports;
 mod shim;
 mod startup_images;
@@ -816,6 +817,7 @@ async fn launch_game(
 
     // Reports made with the game's Report button go to the staff (reports.rs):
     // every few seconds while this game runs, and once more after it closes.
+    // With each goes the replay of its match (replays.rs), once the match is over.
     if let Some(dir) = reports_dir {
         let running_pid = state.running_pid.clone();
         let session = session.clone();
@@ -823,7 +825,7 @@ async fn launch_game(
             loop {
                 tokio::time::sleep(reports::EVERY).await;
                 let closed = running_pid.lock().map(|running| *running != Some(pid)).unwrap_or(true);
-                reports::send_pending(&session, &dir).await;
+                reports::send_pending(&session, &dir, !closed).await;
                 if closed {
                     break;
                 }
