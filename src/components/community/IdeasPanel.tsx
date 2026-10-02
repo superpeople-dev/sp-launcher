@@ -5,6 +5,7 @@ import { Icon, type IconName } from "./Icon";
 import { Picker } from "./Picker";
 import { ItemDetail } from "./ItemDetail";
 import { SuggestDialog } from "./SuggestDialog";
+import { tagIcon } from "./Tag";
 import { useBoard } from "./useBoard";
 import { VoteControl } from "./VoteControl";
 
@@ -105,6 +106,7 @@ export function IdeasPanel({ me, onError, onNotice }: Props) {
                         {item.status === "under_review" && <span className="row__review">In review</span>}
                         {item.tags.slice(0, 1).map((t) => (
                           <span key={t.name} className="row__tag" style={{ color: t.color }}>
+                            <Icon name={tagIcon(t.name)} />
                             {t.name}
                           </span>
                         ))}

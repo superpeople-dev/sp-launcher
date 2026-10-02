@@ -84,6 +84,20 @@ export default function App() {
   // there is no reason to hit the disk that often.
   const saveTimer = useRef<number | null>(null);
 
+  // Tab does not move between buttons, cards and tabs: there are no focus rings (community.css),
+  // and focus wandering unseen would let Enter press something nobody can see. In a text field
+  // it still goes on to the next field.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const at = document.activeElement;
+      if (at instanceof HTMLElement && at.matches("textarea, input:not([type=checkbox]):not([type=radio])")) return;
+      e.preventDefault();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   useEffect(() => {
     void (async () => {
       // Nothing below may throw uncaught: `config` staying null renders an

@@ -23,6 +23,7 @@ import { Avatar } from "./Avatar";
 import { EditDialog } from "./EditDialog";
 import { Icon } from "./Icon";
 import { Menu, Picker, TeamMark, type MenuEntry } from "./Picker";
+import { Tag } from "./Tag";
 import { VoteControl } from "./VoteControl";
 
 interface Props {
@@ -234,11 +235,7 @@ export function ItemDetail({ item, me, onVote, onChange, onGone, onError, onNoti
         <header className="detail__head">
           <div className="detail__labels">
             <span className={`status status--${item.status}`}>{STATUS_LABEL[item.status]}</span>
-            {item.tags.map((t) => (
-              <span key={t.name} className="tag" style={{ color: t.color, borderColor: `${t.color}66` }}>
-                {t.name}
-              </span>
-            ))}
+            {item.tags.map((t) => <Tag key={t.name} tag={t} />)}
             <span className="detail__actions">
               {menu.length > 0 && <Menu entries={menu} title="Admin actions" disabled={busy} />}
               {onClose && (
