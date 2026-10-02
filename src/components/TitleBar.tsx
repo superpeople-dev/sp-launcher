@@ -6,15 +6,29 @@ import type { Profile, Tab } from "../types";
 import { Avatar } from "./community/Avatar";
 import { NameDialog } from "./NameDialog";
 
-// Settings lives in the profile menu, next to Sign out: the tabs fill the 860 px window (six with
-// short labels leave about 35 px). Download always comes right after Play.
-const TABS: { id: Tab; label: string }[] = [
-  { id: "play", label: "Play" },
-  { id: "download", label: "Download" },
-  { id: "ideas", label: "Ideas" },
-  { id: "roadmap", label: "Roadmap" },
-  { id: "completed", label: "Completed" },
-  { id: "twitch", label: "Twitch" },
+// The pages, grouped so the 860 px window holds as many as needed: Play and Download are one
+// click away (Download always right after Play), the others sit in sections whose list opens below
+// them on hover or click. Settings lives in the profile menu, next to Sign out.
+type Page = { id: Tab; label: string; hint: string };
+type Section = { label: string; pages: Page[] };
+const SECTIONS: Section[] = [
+  { label: "Play", pages: [{ id: "play", label: "Play", hint: "" }] },
+  { label: "Download", pages: [{ id: "download", label: "Download", hint: "" }] },
+  {
+    label: "Community",
+    pages: [
+      { id: "ideas", label: "Ideas", hint: "Vote on ideas and bug reports, or post your own" },
+      { id: "roadmap", label: "Roadmap", hint: "What the team is working on" },
+      { id: "completed", label: "Completed", hint: "What was finished lately" },
+    ],
+  },
+  {
+    label: "Players",
+    pages: [
+      { id: "leaderboard", label: "Leaderboard", hint: "The season's top 100 of each mode" },
+      { id: "twitch", label: "Twitch", hint: "The most popular SUPER PEOPLE streams, live" },
+    ],
+  },
 ];
 
 interface Props {
@@ -44,16 +58,20 @@ export function TitleBar({ tab, onTab, profile, onSignOut }: Props) {
 
         {profile ? (
           <nav className="nav">
-            {TABS.map((t) => (
-              <button
-                key={t.id}
-                className={`tab${tab === t.id ? " is-active" : ""}`}
-                onClick={() => onTab(t.id)}
-                type="button"
-              >
-                {t.label}
-              </button>
-            ))}
+            {SECTIONS.map((s) =>
+              s.pages.length === 1 ? (
+                <button
+                  key={s.label}
+                  className={`tab${tab === s.pages[0].id ? " is-active" : ""}`}
+                  onClick={() => onTab(s.pages[0].id)}
+                  type="button"
+                >
+                  {s.label}
+                </button>
+              ) : (
+                <SectionMenu key={s.label} section={s} tab={tab} onTab={onTab} />
+              ),
+            )}
           </nav>
         ) : (
           <div className="nav" data-tauri-drag-region />
@@ -85,6 +103,77 @@ export function TitleBar({ tab, onTab, profile, onSignOut }: Props) {
       </header>
       {renaming && profile && <NameDialog onClose={() => setRenaming(false)} />}
     </>
+  );
+}
+
+// A section's list stays open this long after the pointer leaves, so moving down into it from the
+// tab does not close it.
+const CLOSE_MS = 160;
+
+/** A section of the top menu: its pages in a list below it, on hover or click. */
+function SectionMenu({ section, tab, onTab }: { section: Section; tab: Tab; onTab: (tab: Tab) => void }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const timer = useRef(0);
+  const active = section.pages.some((p) => p.id === tab);
+
+  const show = () => {
+    window.clearTimeout(timer.current);
+    setOpen(true);
+  };
+  const hide = () => {
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setOpen(false), CLOSE_MS);
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => !root.current?.contains(e.target as Node) && setOpen(false);
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+
+  return (
+    <div className={`section${open ? " is-open" : ""}`} ref={root} onMouseEnter={show} onMouseLeave={hide}>
+      <button
+        type="button"
+        className={`tab section__btn${active ? " is-active" : ""}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        {section.label}
+        <svg className="section__chev" viewBox="0 0 10 10" aria-hidden>
+          <path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.4" />
+        </svg>
+      </button>
+      {open && (
+        <div className="section__menu" role="menu">
+          {section.pages.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              role="menuitem"
+              className={`section__item${p.id === tab ? " is-on" : ""}`}
+              onClick={() => {
+                setOpen(false);
+                onTab(p.id);
+              }}
+            >
+              <span className="section__name">{p.label}</span>
+              <span className="section__hint">{p.hint}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
