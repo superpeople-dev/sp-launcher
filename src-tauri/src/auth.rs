@@ -387,11 +387,51 @@ pub fn report(session: String, mut event: serde_json::Value) {
     if let Some(fields) = event.as_object_mut() {
         fields.insert("version".into(), env!("CARGO_PKG_VERSION").into());
     }
+    let launched = event.get("action").and_then(|a| a.as_str()) == Some("game.launched");
     tauri::async_runtime::spawn(async move {
+        // The game start's log line shows the player's IP as the website saw
+        // it. A PC with IPv6 reaches the site over it, so first a check-in
+        // over IPv4 (sp-website app/api/launcher/ipv4): the line then shows
+        // both. No IPv4 route, or an older website: nothing, and on we go.
+        if launched {
+            if let Ok(v4) = ipv4_client() {
+                let url = format!("{}/api/launcher/ipv4", site_url());
+                let _ = v4.post(url).bearer_auth(&session).timeout(std::time::Duration::from_secs(4)).send().await;
+            }
+        }
         let Ok(client) = client() else { return };
         let url = format!("{}/api/launcher/log", site_url());
         let _ = client.post(url).bearer_auth(session).json(&event).send().await;
     });
+}
+
+/// Looks names up to their IPv4 addresses only, so a client using it
+/// connects over IPv4 or not at all.
+struct Ipv4Only;
+
+impl reqwest::dns::Resolve for Ipv4Only {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let found = tokio::task::spawn_blocking(move || {
+                use std::net::ToSocketAddrs;
+                (host.as_str(), 0).to_socket_addrs().map(|all| all.filter(|a| a.is_ipv4()).collect::<Vec<_>>())
+            })
+            .await??;
+            if found.is_empty() {
+                return Err("no IPv4 address".into());
+            }
+            Ok(Box::new(found.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+fn ipv4_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
+        .dns_resolver(std::sync::Arc::new(Ipv4Only))
+        .build()
+        .map_err(LauncherError::Http)
 }
 
 /// The player disconnected the launcher (#discord-auth-logs). Waits a few
@@ -686,6 +726,28 @@ mod tests {
             launch_body("p", "d", &two),
             serde_json::json!({ "pass": "p", "device_id": "d", "pc": { "v": 1, "board": "b", "windows": "w" } })
         );
+    }
+
+    #[tokio::test]
+    async fn the_check_in_goes_over_ipv4() {
+        use reqwest::dns::Resolve;
+        let found: Vec<_> = Ipv4Only.resolve("localhost".parse().unwrap()).await.expect("localhost").collect();
+        assert!(!found.is_empty() && found.iter().all(|a| a.is_ipv4()), "{found:?}");
+
+        // A server on IPv4 sees the client come from an IPv4 address.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut sock, from) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+            from
+        });
+        let res = ipv4_client().unwrap().get(format!("http://localhost:{port}/")).send().await.expect("sent");
+        assert_eq!(res.status().as_u16(), 204);
+        assert!(peer.await.unwrap().is_ipv4());
     }
 
     #[test]
