@@ -48,33 +48,37 @@ export function CompletedPanel({ me, onError, onNotice }: Props) {
         <p className="done__lead">What the team finished lately, from your ideas and bug reports.</p>
       </header>
 
-      <ol className="timeline" aria-busy={items === null} ref={list} onScroll={fill}>
-        {items === null
-          ? Array.from({ length: PAGE }, (_, i) => <li key={i} className="entry entry--ghost" />)
-          : done.slice(0, shown).map((item) => {
-              const when = dayAndYear(item.completedAt ?? item.createdAt);
-              return (
-                <li key={item.id}>
-                  <button type="button" className="entry" onClick={() => setOpen(item.id)}>
-                    <span className="entry__date">
-                      {when.day}
-                      {when.year && <span className="entry__year">{when.year}</span>}
-                    </span>
-                    <span className="entry__main">
-                      <span className="entry__title">{item.title}</span>
-                      {item.description && <span className="entry__desc">{item.description}</span>}
-                      <span className="entry__meta">
-                        {item.tags.map((t) => <Tag key={t.name} tag={t} />)}
-                        <span className="entry__score">▲ {item.score}</span>
+      {items !== null && done.length === 0 ? (
+        <div className="timeline__empty">
+          <p className="done__empty">Nothing finished yet.</p>
+        </div>
+      ) : (
+        <ol className="timeline" aria-busy={items === null} ref={list} onScroll={fill}>
+          {items === null
+            ? Array.from({ length: PAGE }, (_, i) => <li key={i} className="entry entry--ghost" />)
+            : done.slice(0, shown).map((item) => {
+                const when = dayAndYear(item.completedAt ?? item.createdAt);
+                return (
+                  <li key={item.id}>
+                    <button type="button" className="entry" onClick={() => setOpen(item.id)}>
+                      <span className="entry__date">
+                        {when.day}
+                        {when.year && <span className="entry__year">{when.year}</span>}
                       </span>
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-      </ol>
-
-      {items !== null && done.length === 0 && <p className="done__empty">Nothing finished yet.</p>}
+                      <span className="entry__main">
+                        <span className="entry__title">{item.title}</span>
+                        {item.description && <span className="entry__desc">{item.description}</span>}
+                        <span className="entry__meta">
+                          {item.tags.map((t) => <Tag key={t.name} tag={t} />)}
+                          <span className="entry__score">▲ {item.score}</span>
+                        </span>
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+        </ol>
+      )}
 
       {current && (
         <div className="sheet" onMouseDown={() => setOpen(null)}>

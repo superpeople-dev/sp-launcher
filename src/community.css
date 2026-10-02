@@ -120,7 +120,20 @@
   background: #16161a;
   border: 1px solid var(--line);
   box-shadow: 0 18px 44px rgba(0,0,0,0.6);
-  animation: rise .14s ease both;
+}
+/* The top menus stay in the page and fade in and out with transitions, so the pointer coming back
+   while one closes turns it round smoothly instead of starting over. Opening rises and settles with
+   a strong ease-out; closing is quicker, sinks back a little, and is hidden once it has faded. */
+.section__menu, .me__menu{
+  opacity: 0; transform: translateY(6px); visibility: hidden;
+  transition: opacity .15s ease, transform .15s ease, visibility 0s linear .15s;
+}
+.section__menu.is-open, .me__menu.is-open{
+  z-index: 41; opacity: 1; transform: none; visibility: visible;
+  transition: opacity .2s cubic-bezier(.23,1,.32,1), transform .2s cubic-bezier(.23,1,.32,1), visibility 0s;
+}
+@media (prefers-reduced-motion: reduce){
+  .section__menu, .me__menu{ transform: none; }
 }
 .section__item{
   width:100%; display:grid; grid-template-columns: 18px 1fr; column-gap: 11px; align-items: start;
@@ -157,7 +170,6 @@
   background: #16161a;
   border: 1px solid var(--line);
   box-shadow: 0 18px 44px rgba(0,0,0,0.6);
-  animation: rise .14s ease both;
 }
 .me__who{
   display:flex; align-items:center; gap: 10px;
@@ -351,7 +363,7 @@
 .ideas__suggest svg{ width: 11px; height: 11px; }
 .ideas__body{ display:grid; grid-template-columns: 318px 1fr; gap: 12px; min-height: 0; }
 .ideas__list{ list-style:none; margin:0; padding: 0 4px 0 0; display:flex; flex-direction:column; gap: 6px; min-height:0; }
-.ideas__empty{ padding: 18px; color: var(--muted); font-family: var(--read); font-size: 13px; }
+.ideas__empty{ margin: auto 0; padding: 18px; color: var(--muted); font-family: var(--read); font-size: 13px; text-align: center; }
 
 .row{
   width: 100%;
@@ -525,7 +537,7 @@
 .lane__count{ padding: 0 6px; font-size: 12px; font-weight: 800; color: var(--paper-dim); background: rgba(255,255,255,0.07); }
 .lane__hint{ margin-left: auto; font-family: var(--read); font-size: 11.5px; color: var(--muted); }
 .lane__list{ list-style:none; margin:0; padding: 3px 4px 0 0; display:flex; flex-direction:column; gap: 8px; flex: 1 1 auto; min-height: 0; }
-.lane__empty{ padding: 14px; color: var(--muted); font-family: var(--read); font-size: 12.5px; border: 1px dashed var(--line-soft); }
+.lane__empty{ padding: 14px; color: var(--muted); font-family: var(--read); font-size: 12.5px; text-align: center; border: 1px dashed var(--line-soft); }
 .task{
   display:flex; flex-direction:column; gap: 8px;
   padding: 11px 12px 8px;
@@ -552,7 +564,13 @@
 .done__head{ display:flex; align-items:baseline; gap: 14px; }
 .done__title{ margin:0; font-size: 22px; font-weight: 900; letter-spacing: 0.08em; text-transform: uppercase; color: #fff; }
 .done__lead{ margin:0; font-family: var(--read); font-size: 12.5px; color: var(--muted); }
-.done__empty{ color: var(--muted); font-family: var(--read); font-size: 13px; }
+.done__empty{ margin: 0; color: var(--muted); font-family: var(--read); font-size: 13px; }
+/* A page with nothing to list says so in the middle of the space the list would fill, with its
+   "Try again" under it (Completed, Leaderboard, Twitch). */
+.timeline__empty, .leaders__empty, .twitch__empty{
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap: 12px;
+  min-height: 0; padding: 0 24px; text-align: center; text-wrap: balance;
+}
 .timeline{
   list-style:none; margin:0; padding: 0 6px 0 0; min-height: 0;
   display:grid; grid-template-columns: max-content minmax(0, 1fr); align-content: start; row-gap: 8px;
@@ -624,7 +642,6 @@
 .leaders__search{ position: relative; display:flex; align-items:center; margin-left: auto; width: 220px; }
 .leaders__search svg{ position:absolute; left: 9px; width: 13px; height: 13px; color: var(--muted); pointer-events:none; }
 .leaders__search .input{ padding-left: 28px; height: 30px; }
-.leaders__empty{ display:flex; align-items:center; gap: 12px; }
 .leaders__list{ list-style:none; margin:0; padding:0 4px 0 0; display:flex; flex-direction:column; gap: 5px; overflow-y:auto; overscroll-behavior: contain; min-height:0; }
 .leader{
   display:grid; grid-template-columns: 46px minmax(0, 1fr) 150px 110px; align-items:center; gap: 12px;
@@ -659,7 +676,6 @@
 .twitch{ grid-template-rows: auto minmax(0, 1fr); gap: 12px; min-height: 0; }
 .twitch__head{ align-items: center; }
 .twitch__all{ margin-left: auto; flex: none; }
-.twitch__empty{ display:flex; align-items:center; gap: 12px; }
 .twitch__body{ display:grid; grid-template-columns: minmax(0, 1fr) 236px; gap: 12px; min-height: 0; }
 .twitch__main{ display:flex; flex-direction:column; gap: 8px; min-width: 0; }
 .twitch__player{ display:block; width: 100%; aspect-ratio: 16 / 9; border: 1px solid var(--line-soft); background: #000; }
