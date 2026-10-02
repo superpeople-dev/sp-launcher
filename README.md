@@ -36,6 +36,12 @@ Rust backend. Windows only.
   account, and the site posts it to the staff's Discord channel. A report the
   site cannot take yet waits for the next pass; after a week it is dropped
   (`src-tauri/src/reports.rs`).
+- **Watching a reported match.** The report's replay link opens a page on
+  admin.superpeople.dev (staff's Discord sign-in) with **Open in the
+  launcher**: an `sp-launcher://replay/<id>?t=<token>` link, registered with
+  Windows on every start. The launcher asks first, downloads that replay with
+  the one-time token and unzips it into the game's `Saved\Demos`, where the
+  game's Replay menu lists it (`src-tauri/src/replays.rs`).
 - **One game folder.** The Settings tab and the Download tab share a single
   "Game folder": pick a folder that already has the game, or download into it.
 - **Download tab.** Downloads the game's files (about 455 files, 30.7 GB)

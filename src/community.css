@@ -634,6 +634,10 @@
 
 /* the in-game name (NameDialog.tsx) */
 .dialog__card.rename{ width: min(440px, calc(100% - 40px)); }
+
+/* a reported match opened from its page (ReplayDialog.tsx) */
+.dialog__card.replay{ width: min(460px, calc(100% - 40px)); }
+.replay__text{ margin: 4px 0 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .rename__done{ margin: 4px 0 0; font-family: var(--read); font-size: 13px; }
 
 /* the Leaderboard page (LeaderboardPanel.tsx); tier colours as on the website */

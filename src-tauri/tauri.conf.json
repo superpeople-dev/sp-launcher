@@ -58,6 +58,13 @@
       "windows": {
         "installMode": "quiet"
       }
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "sp-launcher"
+        ]
+      }
     }
   }
 }

@@ -375,6 +375,197 @@ pub async fn attach(ctx: &Ctx, session: &str, reports: &Path, report: &mut Map<S
     }
 }
 
+// --------------------------------------------- an admin opening a replay ---
+// The staff's link to a reported match opens its page (sp-backend
+// lib/admingateway.js /replay/<id>, after their Discord sign-in), whose "Open in
+// the launcher" is sp-launcher://replay/<id>?t=<token>. Windows hands that to
+// the launcher (lib.rs, the deep-link plugin); after the admin says yes, the
+// replay is downloaded with the token (it works once, for 10 minutes) and
+// unzipped into the game's Demos folder, where the game's Replay menu lists it.
+
+/// A replay link: the replay's id and its one-time token.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Link {
+    pub id: String,
+    pub token: String,
+}
+
+fn is_hex(s: &str) -> bool {
+    s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// `sp-launcher://replay/<32 hex>?t=<hex>`, or None for anything else.
+pub fn link_of(url: &str) -> Option<Link> {
+    let url = tauri::Url::parse(url).ok()?;
+    if url.scheme() != "sp-launcher" || url.host_str()? != "replay" {
+        return None;
+    }
+    let id = url.path().trim_matches('/');
+    let token = url.query_pairs().find(|(k, _)| k == "t")?.1.into_owned();
+    let ok = id.len() == 32 && is_hex(id) && (16..=128).contains(&token.len()) && is_hex(&token);
+    ok.then(|| Link { id: id.to_ascii_lowercase(), token })
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Fetched {
+    Zip(Vec<u8>),
+    /// Used already, or older than 10 minutes.
+    Expired,
+    /// No longer on the backend (replays are kept 30 days).
+    Gone,
+    TooBig,
+    Failed,
+}
+
+/// The replay's zip, from the game backend, with the link's token.
+pub async fn fetch(backend: &str, link: &Link) -> Fetched {
+    let Ok(client) = crate::auth::client() else { return Fetched::Failed };
+    let res = client
+        .get(format!("{backend}/replays/{}/file", link.id))
+        .query(&[("t", link.token.as_str())])
+        .timeout(UPLOAD_TIMEOUT)
+        .send()
+        .await;
+    let Ok(mut res) = res else { return Fetched::Failed };
+    match res.status().as_u16() {
+        200 => {}
+        403 => return Fetched::Expired,
+        404 => return Fetched::Gone,
+        _ => return Fetched::Failed,
+    }
+    if res.content_length().is_some_and(|n| n > MAX_BYTES) {
+        return Fetched::TooBig;
+    }
+    let mut body = Vec::new();
+    loop {
+        match res.chunk().await {
+            Ok(Some(chunk)) => {
+                body.extend_from_slice(&chunk);
+                if body.len() as u64 > MAX_BYTES {
+                    return Fetched::TooBig;
+                }
+            }
+            Ok(None) => return Fetched::Zip(body),
+            Err(_) => return Fetched::Failed,
+        }
+    }
+}
+
+/// Where an opened replay went: its folder's name in Demos, and whether it was
+/// there already.
+#[derive(Debug, PartialEq, serde::Serialize)]
+pub struct Imported {
+    pub name: String,
+    pub already: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ImportProblem {
+    /// Not one recording's folder (one folder at the top, with its .replayinfo).
+    NotReplay,
+    TooBig,
+    /// The Demos folder could not be written.
+    Write,
+}
+
+/// A folder name the game's own recordings have, and Windows takes.
+fn folder_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 120
+        && !name.starts_with('.')
+        && !name.ends_with(['.', ' '])
+        && !name.chars().any(|c| c.is_control() || "<>:\"/\\|?*".contains(c))
+}
+
+/// Unzips a replay (one recording's folder, as `zip` makes it) into `demos`,
+/// nothing outside its folder. Written to a hidden `.<name>.part` first and
+/// renamed when whole, so the game never lists half of one. A recording that is
+/// there already is left as it is.
+pub fn import(bytes: &[u8], demos: &Path) -> Result<Imported, ImportProblem> {
+    use std::io::Read;
+    use std::path::Component;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|_| ImportProblem::NotReplay)?;
+    if archive.len() == 0 || archive.len() > 10_000 {
+        return Err(ImportProblem::NotReplay);
+    }
+    // One folder at the top, with the recording's .replayinfo right in it.
+    let mut top: Option<String> = None;
+    let mut has_info = false;
+    let mut raw: u64 = 0;
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).map_err(|_| ImportProblem::NotReplay)?;
+        // As written in the zip: a drive (`a:b`) or a backslash is no recording's path,
+        // even where the zip library would make one of it.
+        if entry.name().contains([':', '\\']) {
+            return Err(ImportProblem::NotReplay);
+        }
+        let path = entry.enclosed_name().ok_or(ImportProblem::NotReplay)?;
+        let parts: Vec<Component> = path.components().collect();
+        let first = match parts.first() {
+            Some(Component::Normal(n)) => n.to_string_lossy().into_owned(),
+            _ => return Err(ImportProblem::NotReplay),
+        };
+        if !folder_ok(&first) || parts.iter().skip(1).any(|c| !matches!(c, Component::Normal(_))) {
+            return Err(ImportProblem::NotReplay);
+        }
+        match &top {
+            None => top = Some(first),
+            Some(t) if *t == first => {}
+            Some(_) => return Err(ImportProblem::NotReplay),
+        }
+        if parts.len() == 2 && !entry.is_dir() && path.extension().is_some_and(|e| e == "replayinfo") {
+            has_info = true;
+        }
+        raw += entry.size();
+        if raw > MAX_RAW {
+            return Err(ImportProblem::TooBig);
+        }
+    }
+    let name = top.ok_or(ImportProblem::NotReplay)?;
+    if !has_info {
+        return Err(ImportProblem::NotReplay);
+    }
+    let dest = demos.join(&name);
+    if dest.exists() {
+        return Ok(Imported { name, already: true });
+    }
+    std::fs::create_dir_all(demos).map_err(|_| ImportProblem::Write)?;
+    let part = demos.join(format!(".{name}.part"));
+    let _ = std::fs::remove_dir_all(&part);
+    let mut write = || -> Result<(), ImportProblem> {
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).map_err(|_| ImportProblem::NotReplay)?;
+            let path = entry.enclosed_name().ok_or(ImportProblem::NotReplay)?;
+            let rel = path.strip_prefix(&name).map_err(|_| ImportProblem::NotReplay)?.to_path_buf();
+            let out = part.join(&rel);
+            if entry.is_dir() {
+                std::fs::create_dir_all(&out).map_err(|_| ImportProblem::Write)?;
+                continue;
+            }
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent).map_err(|_| ImportProblem::Write)?;
+            }
+            let size = entry.size();
+            let mut file = std::fs::File::create(&out).map_err(|_| ImportProblem::Write)?;
+            // No more than the entry says it holds, whatever its compressed data unpacks to.
+            let copied = std::io::copy(&mut (&mut entry).take(size + 1), &mut file).map_err(|_| ImportProblem::NotReplay)?;
+            if copied > size {
+                return Err(ImportProblem::NotReplay);
+            }
+        }
+        Ok(())
+    };
+    if let Err(problem) = write() {
+        let _ = std::fs::remove_dir_all(&part);
+        return Err(problem);
+    }
+    if std::fs::rename(&part, &dest).is_err() {
+        let _ = std::fs::remove_dir_all(&part);
+        return Err(ImportProblem::Write);
+    }
+    Ok(Imported { name, already: false })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,5 +672,87 @@ mod tests {
     fn a_header_never_carries_more_than_a_plain_name() {
         assert_eq!(header_name(Path::new("C:/x/kapi_2026-10-01_20-25")), "kapi_2026-10-01_20-25");
         assert_eq!(header_name(Path::new("C:/x/Jörg é\r\nX")), "J_rg____X");
+    }
+
+    // ------------------------------------------- an admin opening a replay ---
+
+    const ID: &str = "0123456789abcdef0123456789abcdef";
+    const TOKEN: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718";
+
+    #[test]
+    fn a_replay_link_is_read_and_anything_else_is_not() {
+        let want = Some(Link { id: ID.into(), token: TOKEN.into() });
+        assert_eq!(link_of(&format!("sp-launcher://replay/{ID}?t={TOKEN}")), want);
+        // Windows or a browser may add a slash before the query; the id in capitals is the same id.
+        assert_eq!(link_of(&format!("sp-launcher://replay/{ID}/?t={TOKEN}")), want);
+        assert_eq!(link_of(&format!("sp-launcher://replay/{}?t={TOKEN}", ID.to_uppercase())), want);
+        for bad in [
+            format!("https://replay/{ID}?t={TOKEN}"),
+            format!("sp-launcher://other/{ID}?t={TOKEN}"),
+            format!("sp-launcher://replay/{ID}"),
+            format!("sp-launcher://replay/{ID}?t=short"),
+            format!("sp-launcher://replay/{ID}?t=not-hex-not-hex-not-hex"),
+            format!("sp-launcher://replay/..%2F..%2Fx?t={TOKEN}"),
+            format!("sp-launcher://replay/{ID}x?t={TOKEN}"),
+            "not a url".to_string(),
+        ] {
+            assert_eq!(link_of(&bad), None, "{bad}");
+        }
+    }
+
+    /// A zip of these (name, bytes) entries, as written by anyone.
+    fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, bytes) in entries {
+            out.start_file(*name, options).unwrap();
+            out.write_all(bytes).unwrap();
+        }
+        out.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn a_replay_opened_from_its_link_lands_in_demos_as_it_was_recorded() {
+        let mine = tempfile::tempdir().unwrap();
+        let dir = recording(mine.path(), "Inquisitor1961_2026-10-02_20-48", Some((1, 2, false, ME)), true);
+        let bytes = zip(&dir).unwrap();
+        let theirs = tempfile::tempdir().unwrap();
+        let demos = theirs.path().join("Saved").join("Demos");
+        let got = import(&bytes, &demos).unwrap();
+        assert_eq!(got, Imported { name: "Inquisitor1961_2026-10-02_20-48".into(), already: false });
+        let out = demos.join("Inquisitor1961_2026-10-02_20-48");
+        assert_eq!(std::fs::read(out.join("MK3D.demo")).unwrap(), vec![7u8; 50_000]);
+        assert_eq!(std::fs::read(out.join("checkpoints").join("checkpoint0")).unwrap(), b"checkpoint");
+        assert!(out.join("MK3D.replayinfo").exists() && out.join("MK3D.final").exists());
+        // Nothing half-written left beside it.
+        let names: Vec<_> = std::fs::read_dir(&demos).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+
+        // Again: there already, and left as it is.
+        std::fs::write(out.join("MK3D.header"), b"mine").unwrap();
+        assert_eq!(import(&bytes, &demos).unwrap(), Imported { name: "Inquisitor1961_2026-10-02_20-48".into(), already: true });
+        assert_eq!(std::fs::read(out.join("MK3D.header")).unwrap(), b"mine");
+    }
+
+    #[test]
+    fn a_zip_that_is_not_one_recording_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let demos = tmp.path().join("Demos");
+        let info: &[u8] = b"{}";
+        for (why, bytes) in [
+            ("no zip at all", b"not a zip".to_vec()),
+            ("no .replayinfo", zip_of(&[("a_2026/MK3D.demo", b"x")])),
+            ("two folders", zip_of(&[("a_2026/MK3D.replayinfo", info), ("b_2026/MK3D.demo", b"x")])),
+            ("a file at the top", zip_of(&[("MK3D.replayinfo", info)])),
+            ("out of its folder", zip_of(&[("a_2026/MK3D.replayinfo", info), ("a_2026/../../evil.txt", b"x")])),
+            ("an absolute path", zip_of(&[("a_2026/MK3D.replayinfo", info), ("/evil.txt", b"x")])),
+            ("a hidden folder", zip_of(&[(".a/MK3D.replayinfo", info)])),
+            ("a name Windows refuses", zip_of(&[("a:b/MK3D.replayinfo", info)])),
+            ("the .replayinfo deeper down", zip_of(&[("a_2026/sub/MK3D.replayinfo", info)])),
+        ] {
+            assert_eq!(import(&bytes, &demos), Err(ImportProblem::NotReplay), "{why}");
+        }
+        assert!(!demos.exists() || std::fs::read_dir(&demos).unwrap().next().is_none(), "something was written");
+        assert!(!tmp.path().join("evil.txt").exists());
     }
 }
