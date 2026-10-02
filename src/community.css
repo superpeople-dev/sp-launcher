@@ -110,7 +110,7 @@
 
 /* ---- the top menu's sections (TitleBar.tsx SectionMenu) ---- */
 .section{ position: relative; display:flex; }
-.section__btn{ display:flex; align-items:center; gap: 6px; }
+.section__btn{ display:flex; align-items:center; gap: 7px; }
 .section__chev{ width: 9px; height: 9px; opacity: 0.7; transition: transform .15s ease; }
 .section.is-open .section__btn{ color: #fff; background: rgba(255,255,255,0.05); }
 .section.is-open .section__chev{ transform: rotate(180deg); }

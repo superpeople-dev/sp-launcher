@@ -18,6 +18,18 @@ const icon = (paths: ReactNode) => (
   </svg>
 );
 const ICONS = {
+  // The top tabs: a play triangle, an arrow into a tray, a speech bubble and two people.
+  play: icon(<path d="M7.5 5.2v13.6L18.5 12 7.5 5.2z" />),
+  download: icon(<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14" />),
+  community: icon(
+    <path d="M12 4.5c-4.7 0-8.5 3.1-8.5 7 0 2.1 1.1 4 2.9 5.3L5.7 20l4.1-1.9c.7.1 1.4.2 2.2.2 4.7 0 8.5-3.1 8.5-7s-3.8-6.8-8.5-6.8z" />,
+  ),
+  players: icon(
+    <>
+      <circle cx="9" cy="8.5" r="3.5" />
+      <path d="M2.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6M16 5.3a3.5 3.5 0 0 1 0 6.4M18 14.4c2.1.7 3.5 2.8 3.5 5.6" />
+    </>,
+  ),
   // A light bulb: ideas and bug reports.
   ideas: icon(
     <>
@@ -54,12 +66,13 @@ const ICONS = {
     </>,
   ),
 };
-type Section = { label: string; pages: Page[] };
+type Section = { label: string; icon: ReactNode; pages: Page[] };
 const SECTIONS: Section[] = [
-  { label: "Play", pages: [{ id: "play", label: "Play", hint: "" }] },
-  { label: "Download", pages: [{ id: "download", label: "Download", hint: "" }] },
+  { label: "Play", icon: ICONS.play, pages: [{ id: "play", label: "Play", hint: "" }] },
+  { label: "Download", icon: ICONS.download, pages: [{ id: "download", label: "Download", hint: "" }] },
   {
     label: "Community",
+    icon: ICONS.community,
     pages: [
       { id: "ideas", label: "Ideas", hint: "Vote on ideas and bug reports, or post your own", icon: ICONS.ideas },
       { id: "roadmap", label: "Roadmap", hint: "What the team is working on", icon: ICONS.roadmap },
@@ -68,6 +81,7 @@ const SECTIONS: Section[] = [
   },
   {
     label: "Players",
+    icon: ICONS.players,
     pages: [
       { id: "leaderboard", label: "Leaderboard", hint: "The season's top 100 of each mode", icon: ICONS.leaderboard },
       { id: "twitch", label: "Twitch", hint: "The most popular SUPER PEOPLE streams, live", icon: ICONS.twitch },
@@ -110,6 +124,7 @@ export function TitleBar({ tab, onTab, profile, onSignOut }: Props) {
                   onClick={() => onTab(s.pages[0].id)}
                   type="button"
                 >
+                  <span className="tab__icon">{s.icon}</span>
                   {s.label}
                 </button>
               ) : (
@@ -194,6 +209,7 @@ function SectionMenu({ section, tab, onTab }: { section: Section; tab: Tab; onTa
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
       >
+        <span className="tab__icon">{section.icon}</span>
         {section.label}
         <svg className="section__chev" viewBox="0 0 10 10" aria-hidden>
           <path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.4" />

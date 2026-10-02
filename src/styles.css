@@ -193,7 +193,8 @@ html, body, #root{
 .tab{
   position: relative;
   appearance:none; border:0; background:transparent;
-  padding: 0 15px;
+  display:flex; align-items:center; gap:7px;
+  padding: 0 14px;
   font-family: var(--font);
   font-weight:800; font-size:14.5px;
   letter-spacing:0.10em; text-transform:uppercase;
@@ -220,6 +221,9 @@ html, body, #root{
     rgba(239,68,56,0.10) 100%);
 }
 .tab.is-active::before{ opacity:1; }
+/* each top tab's line icon, in the label's colour (TitleBar.tsx) */
+.tab__icon{ display:inline-flex; flex:none; }
+.tab__icon svg{ width:15px; height:15px; stroke-width:2.1; }
 
 .winbtns{ display:flex; align-items:stretch; -webkit-app-region: no-drag; }
 .winbtn{
