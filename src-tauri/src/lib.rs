@@ -237,6 +237,7 @@ fn hosts_remove(state: State<'_, AppState>) -> Result<()> {
 fn relaunch_elevated(app: AppHandle) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         let exe = std::env::current_exe()?;
         let path = exe.display().to_string();
         if path.contains('\'') {
@@ -244,6 +245,9 @@ fn relaunch_elevated(app: AppHandle) -> Result<()> {
                 "cannot elevate: the launcher path contains a quote".into(),
             ));
         }
+        // CREATE_NO_WINDOW: -WindowStyle Hidden only hides the console once PowerShell has
+        // started, so without it a blue PowerShell window flashed up while the launcher opened.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         std::process::Command::new("powershell")
             .args([
                 "-NoProfile",
@@ -252,6 +256,7 @@ fn relaunch_elevated(app: AppHandle) -> Result<()> {
                 "-Command",
                 &format!("Start-Process -FilePath '{path}' -Verb RunAs"),
             ])
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| LauncherError::Message(format!("could not request elevation: {e}")))?;
         app.exit(0);
