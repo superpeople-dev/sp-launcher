@@ -123,13 +123,17 @@
   animation: rise .14s ease both;
 }
 .section__item{
-  width:100%; display:flex; flex-direction:column; gap: 2px;
+  width:100%; display:grid; grid-template-columns: 18px 1fr; column-gap: 11px; align-items: start;
   padding: 8px 9px;
   appearance:none; border:0; background: transparent; text-align: left;
   color: var(--paper-dim); cursor: pointer;
 }
 .section__item:hover{ background: rgba(255,255,255,0.06); color: #fff; }
 .section__item.is-on{ color: #fff; box-shadow: inset 2px 0 0 var(--signal-hi); }
+.section__icon{ display:flex; width: 18px; height: 18px; margin-top: 1px; color: var(--muted); transition: color .15s ease; }
+.section__icon svg{ width: 18px; height: 18px; }
+.section__item:hover .section__icon, .section__item.is-on .section__icon{ color: var(--signal-hi); }
+.section__text{ display:flex; flex-direction:column; gap: 2px; min-width: 0; }
 .section__name{ font-family: var(--font); font-size: 13.5px; font-weight: 800; letter-spacing: 0.09em; text-transform: uppercase; }
 .section__hint{ font-family: var(--read); font-size: 11.5px; color: var(--muted); }
 
