@@ -307,7 +307,7 @@
   background: rgba(255,255,255,0.14); border: 2px solid transparent; background-clip: content-box; border-radius: 8px;
 }
 
-.row--ghost, .task--ghost, .entry--ghost, .thread__loading span, .skel{
+.row--ghost, .task--ghost, .entry--ghost, .chan--ghost, .thread__loading span, .skel{
   border: 1px solid var(--line-soft);
   background: linear-gradient(90deg, rgba(255,255,255,0.02), rgba(255,255,255,0.05), rgba(255,255,255,0.02));
   background-size: 200% 100%;
@@ -588,6 +588,40 @@
 /* the in-game name (NameDialog.tsx) */
 .dialog__card.rename{ width: min(440px, calc(100% - 40px)); }
 .rename__done{ margin: 4px 0 0; font-family: var(--read); font-size: 13px; }
+
+/* the Twitch tab (TwitchPanel.tsx) */
+.twitch{ grid-template-rows: auto minmax(0, 1fr); gap: 12px; min-height: 0; }
+.twitch__head{ align-items: center; }
+.twitch__all{ margin-left: auto; flex: none; }
+.twitch__empty{ display:flex; align-items:center; gap: 12px; }
+.twitch__body{ display:grid; grid-template-columns: minmax(0, 1fr) 236px; gap: 12px; min-height: 0; }
+.twitch__main{ display:flex; flex-direction:column; gap: 8px; min-width: 0; }
+.twitch__player{ display:block; width: 100%; aspect-ratio: 16 / 9; border: 1px solid var(--line-soft); background: #000; }
+.twitch__now{ display:flex; align-items:center; gap: 12px; min-width: 0; }
+.twitch__who{ display:flex; flex-direction:column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+.twitch__name{ font-size: 16px; font-weight: 900; letter-spacing: 0.06em; text-transform: uppercase; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.twitch__title{ font-family: var(--read); font-size: 12px; color: var(--paper-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.twitch__stats{ display:flex; align-items:center; gap: 6px; flex: none; font-family: var(--read); font-size: 12px; color: var(--paper-dim); white-space:nowrap; }
+.twitch__dot{ width: 7px; height: 7px; border-radius: 50%; background: var(--signal); }
+.twitch__list{ list-style:none; margin:0; padding:0 2px 0 0; display:flex; flex-direction:column; gap: 6px; overflow-y:auto; min-height: 0; }
+.chan{
+  width: 100%; display:grid; grid-template-columns: 92px minmax(0, 1fr); gap: 8px; align-items:start;
+  padding: 5px; appearance:none; text-align:left;
+  border: 1px solid var(--line-soft);
+  background: linear-gradient(150deg, rgba(24,32,42,0.5), rgba(11,16,23,0.36));
+  color: var(--paper); cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+.chan:hover{ border-color: rgba(145,70,255,0.55); }
+.chan.is-on{ border-color: rgba(145,70,255,0.85); background: linear-gradient(150deg, rgba(40,30,58,0.6), rgba(11,16,23,0.4)); }
+.chan__shot{ position:relative; display:block; aspect-ratio: 16 / 9; background: var(--surface-2); overflow:hidden; }
+.chan__shot img{ display:block; width:100%; height:100%; object-fit:cover; }
+.chan__rank{ position:absolute; left: 0; top: 0; min-width: 16px; padding: 0 4px; background: rgba(4,4,6,0.8); font-size: 11px; font-weight: 900; text-align:center; }
+.chan__text{ display:flex; flex-direction:column; gap: 1px; min-width: 0; }
+.chan__name{ font-size: 13px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.chan__viewers{ font-family: var(--read); font-size: 11px; color: var(--signal-hi); white-space:nowrap; }
+.chan__title{ font-family: var(--read); font-size: 11px; color: var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.chan--ghost{ height: 62px; }
 
 /* the Terms of Service before Play (TermsDialog.tsx) */
 .dialog__card.terms{ width: min(640px, calc(100% - 40px)); }

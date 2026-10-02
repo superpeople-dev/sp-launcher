@@ -15,6 +15,7 @@ mod pcid;
 mod reports;
 mod shim;
 mod startup_images;
+mod twitch;
 mod gateway;
 pub mod hosts;
 pub mod news;
@@ -343,6 +344,12 @@ fn expired(app: &AppHandle, state: &State<'_, AppState>, error: LauncherError) -
 async fn account_name(app: AppHandle, state: State<'_, AppState>, name: Option<String>) -> Result<auth::GameName> {
     let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
     auth::game_name(&session, name.as_deref()).await.map_err(|e| expired(&app, &state, e))
+}
+
+/// Who is live on Twitch in the SUPER PEOPLE category (twitch.rs).
+#[tauri::command]
+async fn twitch_streams() -> Result<twitch::Streams> {
+    twitch::live().await
 }
 
 #[tauri::command]
@@ -1087,6 +1094,7 @@ pub fn run() {
             community_comment,
             community_post_idea,
             server_status,
+            twitch_streams,
             download_status,
             download_start,
             download_pause,

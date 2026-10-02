@@ -20,11 +20,12 @@
         "maximizable": false,
         "decorations": false,
         "center": true,
-        "transparent": false
+        "transparent": false,
+        "useHttpsScheme": true
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: https: http:; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; img-src 'self' data: https: http:; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost; frame-src https://player.twitch.tv"
     }
   },
   "bundle": {
