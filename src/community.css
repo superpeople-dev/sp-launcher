@@ -683,6 +683,9 @@
 .twitch{ grid-template-rows: auto minmax(0, 1fr); gap: 12px; min-height: 0; }
 .twitch__head{ align-items: center; }
 .twitch__all{ margin-left: auto; flex: none; }
+/* A button that opens the browser: its label, then the outside arrow. */
+.btn--out{ display:inline-flex; align-items:center; gap: 7px; }
+.btn--out .icon{ width: 13px; height: 13px; }
 .twitch__body{ display:grid; grid-template-columns: minmax(0, 1fr) 236px; gap: 12px; min-height: 0; }
 /* The player and its line keep their size; what is under them takes the room left, and scrolls. */
 .twitch__main{ display:grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 8px; min-width: 0; min-height: 0; }

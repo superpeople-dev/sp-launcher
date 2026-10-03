@@ -24,6 +24,8 @@ const PATHS = {
   gamepad: "M7.5 7.5h9a4.5 4.5 0 0 1 4.4 5.5l-.6 2.9a2.6 2.6 0 0 1-4.6 1l-1.3-1.9h-4.8l-1.3 1.9a2.6 2.6 0 0 1-4.6-1l-.6-2.9a4.5 4.5 0 0 1 4.4-5.5ZM8 10.5v3M6.5 12h3M15.5 11h.01M17 13h.01",
   globe: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3Z",
   tag: "M3.5 12.3V4.5a1 1 0 0 1 1-1h7.8l8.2 8.2-8.8 8.8-8.2-8.2ZM8.5 8.5h.01",
+  // Opens outside the launcher, in the browser.
+  external: "M14 4h6v6M20 4l-8.5 8.5M18 13.5V19a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5.5",
 } as const;
 
 export type IconName = keyof typeof PATHS;

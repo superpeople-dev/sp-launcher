@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { Icon } from "./community/Icon";
 
 interface Props {
   onError: (message: string) => void;
@@ -181,10 +182,11 @@ export function TwitchPanel({ onError }: Props) {
         <p className="done__lead">The most popular SUPER PEOPLE streams.</p>
         <button
           type="button"
-          className="btn twitch__all"
+          className="btn btn--out twitch__all"
           onClick={() => void open(data?.category || "https://www.twitch.tv/directory/category/super-people")}
         >
           See all on Twitch
+          <Icon name="external" />
         </button>
       </header>
 
@@ -235,8 +237,9 @@ export function TwitchPanel({ onError }: Props) {
                 {viewers(playing.viewers)}
                 {playing.startedAt && ` - ${liveFor(playing.startedAt)}`}
               </span>
-              <button type="button" className="btn" onClick={() => void open(`https://www.twitch.tv/${playing.login}`)}>
+              <button type="button" className="btn btn--out" onClick={() => void open(`https://www.twitch.tv/${playing.login}`)}>
                 Open on Twitch
+                <Icon name="external" />
               </button>
             </div>
             <About stream={playing} onOpen={(url) => void open(url)} />
