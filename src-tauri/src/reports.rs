@@ -202,7 +202,7 @@ mod tests {
 
     /// No Demos folder: every report goes without a replay, asking nobody for one.
     fn no_replays() -> crate::replays::Ctx {
-        crate::replays::Ctx { demos: None, site: "http://127.0.0.1:9".into(), backend: "http://127.0.0.1:9".into(), running: false }
+        crate::replays::Ctx { demos: None, site: "http://127.0.0.1:9".into(), running: false }
     }
 
     /// One request as a test server saw it: the request line and headers, and the body.
@@ -211,10 +211,11 @@ mod tests {
         body: Vec<u8>,
     }
 
-    /// A server that answers each request with the next (status, JSON body), and
-    /// hands back what it was sent, bodies whole (a zip is bigger than one read).
-    async fn server(replies: Vec<(u16, &'static str)>) -> (String, tokio::task::JoinHandle<Vec<Seen>>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    /// A server on `port` (0: any) that answers each request with the next (status,
+    /// JSON body), and hands back what it was sent, bodies whole (a zip is bigger
+    /// than one read).
+    async fn server_on(port: u16, replies: Vec<(u16, &'static str)>) -> (String, tokio::task::JoinHandle<Vec<Seen>>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let task = tokio::spawn(async move {
             let mut seen = Vec::new();
@@ -278,32 +279,32 @@ mod tests {
         let body = format!(r#"{{"v":1,"reason":1,"replay":"{ME}_r__103_2026-10-02_00_37_03.7z"}}"#);
         report(dir.path(), &format!("report-{}-1-1.json", start + 5 * 60_000), &body);
         report(dir.path(), &format!("report-{}-1-2.json", start + 9 * 60_000), &body);
-        let (base, server) = server(vec![
-            (200, r#"{"pass":"pass-1"}"#),
-            (200, r#"{"ok":true,"id":"ab","url":"https://admin.superpeople.dev/replay/abababababababababababababababab","bytes":4321}"#),
-            (204, ""),
-            (204, ""),
-        ])
-        .await;
-        let ctx = crate::replays::Ctx {
-            demos: Some(demos.path().to_path_buf()),
-            site: base.clone(),
-            backend: format!("{base}/launcher/api"),
-            running: false,
-        };
+        // The site's answer names an upload link on the same stand-in server.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let started: &'static str = Box::leak(
+            format!(r#"{{"id":"{0}","upload_url":"http://127.0.0.1:{port}/media/replays/{0}/kapi.zip?sig=1","url":"https://superpeople.dev/replays/{0}","max_bytes":67108864}}"#, "ab".repeat(16))
+                .into_boxed_str(),
+        );
+        let (base, server) = server_on(port, vec![(200, started), (200, ""), (204, ""), (204, "")]).await;
+        let ctx = crate::replays::Ctx { demos: Some(demos.path().to_path_buf()), site: base.clone(), running: false };
         let url = format!("{base}/api/launcher/report");
         assert_eq!(send_all(&url, "session-token", dir.path(), &AtomicBool::new(false), &ctx).await, 2);
         let seen = server.await.unwrap();
-        assert!(seen[0].head.starts_with("POST /api/launcher/pass ") && seen[0].head.to_ascii_lowercase().contains("authorization: bearer session-token"));
-        let upload = seen[1].head.to_ascii_lowercase();
-        assert!(seen[1].head.starts_with("POST /launcher/api/replays "), "{}", seen[1].head);
-        assert!(upload.contains("x-sp-pass: pass-1") && upload.contains("x-sp-replay: kapi_2026-10-01_20-25") && upload.contains("content-type: application/zip"));
-        assert!(seen[1].body.starts_with(b"PK\x03\x04") && seen[1].body.len() < 100_000, "the recording, zipped");
+        let ask = String::from_utf8_lossy(&seen[0].body).to_string();
+        assert!(seen[0].head.starts_with("POST /api/launcher/replays ") && seen[0].head.to_ascii_lowercase().contains("authorization: bearer session-token"), "{}", seen[0].head);
+        assert!(ask.contains(r#""name":"kapi_2026-10-01_20-25""#) && ask.contains(r#""bytes":"#), "{ask}");
+        let zip_len = seen[1].body.len();
+        assert!(seen[1].head.starts_with(&format!("PUT /media/replays/{}/kapi.zip?sig=1 ", "ab".repeat(16))), "{}", seen[1].head);
+        assert!(seen[1].head.to_ascii_lowercase().contains("content-type: application/zip"));
+        assert!(seen[1].body.starts_with(b"PK") && zip_len < 100_000, "the recording, zipped, straight to storage");
+        assert!(ask.contains(&format!(r#""bytes":{zip_len}"#)), "the site is told the zip's size: {ask}");
         for report in &seen[2..] {
             let text = String::from_utf8_lossy(&report.body);
             assert!(report.head.starts_with("POST /api/launcher/report "));
-            assert!(text.contains(r#""replay_url":"https://admin.superpeople.dev/replay/abababababababababababababababab""#), "{text}");
-            assert!(text.contains(r#""replay_bytes":4321"#) && text.contains(r#""replay_match":"kapi_2026-10-01_20-25""#), "{text}");
+            assert!(text.contains(&format!(r#""replay_url":"https://superpeople.dev/replays/{}""#, "ab".repeat(16))), "{text}");
+            assert!(text.contains(&format!(r#""replay_bytes":{zip_len}"#)) && text.contains(r#""replay_match":"kapi_2026-10-01_20-25""#), "{text}");
         }
         assert_eq!(seen.len(), 4, "the second report of that match did not upload it again");
     }
@@ -315,7 +316,7 @@ mod tests {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
         match_recording(demos.path(), "kapi_now", now - 5 * 60_000, true);
         let file = report(dir.path(), &format!("report-{}-1-1.json", now - 60_000), r#"{"v":1}"#);
-        let ctx = crate::replays::Ctx { demos: Some(demos.path().to_path_buf()), site: "http://127.0.0.1:9".into(), backend: "http://127.0.0.1:9".into(), running: true };
+        let ctx = crate::replays::Ctx { demos: Some(demos.path().to_path_buf()), site: "http://127.0.0.1:9".into(), running: true };
         // Nobody listens: had it asked anyone, it would have been told nothing.
         assert_eq!(send_all("http://127.0.0.1:9/x", "s", dir.path(), &AtomicBool::new(false), &ctx).await, 0);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), r#"{"v":1}"#, "untouched until the match is over");

@@ -1079,7 +1079,7 @@ async fn replay_import(state: State<'_, AppState>) -> Result<replays::Imported> 
     let Some(demos) = replays::demos_dir() else {
         return Err(LauncherError::Message("The game's replay folder could not be found on this PC.".into()));
     };
-    let bytes = match replays::fetch(auth::AUTH_BASE_URL, &link).await {
+    let bytes = match replays::fetch(&auth::site_url(), auth::AUTH_BASE_URL, &link).await {
         replays::Fetched::Zip(bytes) => bytes,
         replays::Fetched::Expired => {
             return Err(LauncherError::Message(
