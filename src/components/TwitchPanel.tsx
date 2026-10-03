@@ -15,6 +15,24 @@ interface Stream {
   thumbnail: string;
   startedAt: string;
   language: string;
+  // The channel and the stream's details; a website from before them sends none.
+  avatar?: string;
+  bio?: string;
+  badge?: "partner" | "affiliate" | "";
+  since?: string;
+  tags?: string[];
+  mature?: boolean;
+  clips?: Clip[];
+}
+
+/** Mirrors `twitch::Clip`: one of the channel's most watched SUPER PEOPLE clips. */
+interface Clip {
+  title: string;
+  url: string;
+  thumbnail: string;
+  views: number;
+  seconds: number;
+  createdAt: string;
 }
 
 /** Mirrors `twitch::Streams`: streams is null when Twitch could not be reached. */
@@ -37,10 +55,84 @@ function liveFor(iso: string): string {
 
 const viewers = (n: number) => `${n.toLocaleString("en-US")} ${n === 1 ? "viewer" : "viewers"}`;
 
+// "pt" -> "Portuguese"; Twitch's "other" (and anything unknown) shows nothing.
+const languageNames = new Intl.DisplayNames(["en"], { type: "language" });
+function languageName(code: string): string {
+  if (!code || code === "other") return "";
+  try {
+    return languageNames.of(code) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** "On Twitch since 2019", or nothing. */
+function onTwitchSince(iso?: string): string {
+  const year = iso ? new Date(iso).getUTCFullYear() : NaN;
+  return Number.isFinite(year) ? `On Twitch since ${year}` : "";
+}
+
+/** "0:42", "1:05": a clip's length. */
+const clipLength = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.round(seconds % 60)).padStart(2, "0")}`;
+
+const badges = { partner: "Partner", affiliate: "Affiliate" } as const;
+
 // Twitch's player only plays for the page it names as its parent: tauri.localhost in the launcher
 // (served over https, tauri.conf.json useHttpsScheme), localhost in development.
 const player = (login: string) =>
   `https://player.twitch.tv/?channel=${encodeURIComponent(login)}&parent=${encodeURIComponent(window.location.hostname)}&autoplay=true&muted=false`;
+
+/**
+ * Under the player: the channel's bio, its language and years on Twitch, the stream's tags, and the
+ * channel's most watched SUPER PEOPLE clips (opened on Twitch). Scrolls when it is longer than the
+ * room left under the player; nothing shows for a website from before these details.
+ */
+function About({ stream, onOpen }: { stream: Stream; onOpen: (url: string) => void }) {
+  const language = languageName(stream.language);
+  const facts = [language, onTwitchSince(stream.since), stream.mature ? "Mature audiences" : ""].filter(Boolean);
+  // Twitch streams often tag their language too: shown once.
+  const tags = (stream.tags ?? []).filter((tag) => tag.toLowerCase() !== language.toLowerCase());
+  const clips = stream.clips ?? [];
+  if (!stream.bio && !facts.length && !tags.length && !clips.length) return null;
+  return (
+    <div className="twitch__about">
+      {stream.bio && <p className="twitch__bio">{stream.bio}</p>}
+      {(facts.length > 0 || tags.length > 0) && (
+        <ul className="twitch__facts" aria-label="About this stream">
+          {facts.map((fact) => (
+            <li key={fact} className="twitch__fact">
+              {fact}
+            </li>
+          ))}
+          {tags.map((tag) => (
+            <li key={`tag-${tag}`} className="twitch__tag">
+              {tag}
+            </li>
+          ))}
+        </ul>
+      )}
+      {clips.length > 0 && (
+        <section className="twitch__clips" aria-label={`Top SUPER PEOPLE clips from ${stream.name}`}>
+          <h3 className="twitch__sub">Top clips</h3>
+          <ul className="twitch__cliplist">
+            {clips.map((clip) => (
+              <li key={clip.url}>
+                <button type="button" className="clip" title={clip.title} onClick={() => onOpen(clip.url)}>
+                  <span className="clip__shot">
+                    {clip.thumbnail && <img src={clip.thumbnail} alt="" loading="lazy" draggable={false} />}
+                    <span className="clip__len">{clipLength(clip.seconds)}</span>
+                  </span>
+                  <span className="clip__title">{clip.title}</span>
+                  <span className="clip__views">{`${clip.views.toLocaleString("en-US")} ${clip.views === 1 ? "view" : "views"}`}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </div>
+  );
+}
 
 /**
  * The Twitch tab: the most popular SUPER PEOPLE streams (twitch.rs, through the website). The one
@@ -128,8 +220,12 @@ export function TwitchPanel({ onError }: Props) {
               allowFullScreen
             />
             <div className="twitch__now">
+              {playing.avatar && <img className="twitch__avatar" src={playing.avatar} alt="" draggable={false} />}
               <div className="twitch__who">
-                <span className="twitch__name">{playing.name}</span>
+                <span className="twitch__name">
+                  {playing.name}
+                  {playing.badge && <span className={`twitch__badge twitch__badge--${playing.badge}`}>{badges[playing.badge]}</span>}
+                </span>
                 <span className="twitch__title" title={playing.title}>
                   {playing.title}
                 </span>
@@ -143,6 +239,7 @@ export function TwitchPanel({ onError }: Props) {
                 Open on Twitch
               </button>
             </div>
+            <About stream={playing} onOpen={(url) => void open(url)} />
           </div>
           <ul className="twitch__list" aria-label="Live streams, most viewers first">
             {streams?.map((s, i) => (
