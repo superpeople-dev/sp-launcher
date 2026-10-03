@@ -9,8 +9,10 @@
 //! so that file never exists. Instead, before a report goes out (reports.rs),
 //! the recording of the match it was made in is zipped as its folder (the staff
 //! unzip it into their own Demos folder and open it from the game's Replay
-//! menu) and uploaded to the game backend with a game pass (sp-backend
-//! lib/replays.js). The report then carries the staff's link to it.
+//! menu) and uploaded to the website (sp-website lib/replays.ts): it hands
+//! out an upload link, and the zip goes straight into its storage. The report
+//! then carries the replay's page, https://superpeople.dev/replays/<id>, which
+//! needs no sign-in and is kept 30 days.
 //!
 //! A report made during a match waits for that match to end, since the
 //! recording is only whole then, but not longer than [`WAIT`].
@@ -21,14 +23,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
-/// What the backend takes at most (sp-backend lib/replays.js MAX_BYTES). A
+/// What the website takes at most (sp-website lib/replays.ts MAX_BYTES). A
 /// whole match zips to 2-15 MB.
 pub const MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// More than this unzipped is no recording of one match: not even zipped.
 const MAX_RAW: u64 = 1024 * 1024 * 1024;
 /// How far apart the report's clock and the recording's may be.
 const SLACK_MS: u64 = 90_000;
-/// How long a report waits for its match to end, or for the backend to take
+/// How long a report waits for its match to end, or for the website to take
 /// the replay, while the game runs. Once the game is closed it waits no more.
 pub const WAIT: Duration = Duration::from_secs(45 * 60);
 /// An upload of 15 MB on a slow line takes minutes, not the usual seconds.
@@ -44,21 +46,19 @@ pub fn demos_dir() -> Option<PathBuf> {
     Some(Path::new(&base).join("BravoHotelGame").join("Saved").join("Demos"))
 }
 
-/// Where a replay goes and what a game pass is asked for with.
+/// Where a replay comes from and goes to.
 pub struct Ctx {
     /// The game's Demos folder; `None` when there is none to look in.
     pub demos: Option<PathBuf>,
-    /// The website, for the game pass (`/api/launcher/pass`).
+    /// The website, which hands out the upload link (`/api/launcher/replays`).
     pub site: String,
-    /// The game backend's launcher API (`/replays`).
-    pub backend: String,
     /// Whether the game is still running: a report may then wait for its match.
     pub running: bool,
 }
 
 impl Ctx {
     pub fn live(running: bool) -> Self {
-        Ctx { demos: demos_dir(), site: crate::auth::site_url(), backend: crate::auth::AUTH_BASE_URL.into(), running }
+        Ctx { demos: demos_dir(), site: crate::auth::site_url(), running }
     }
 }
 
@@ -228,22 +228,18 @@ pub fn zip(dir: &Path) -> Result<Vec<u8>, ZipProblem> {
 enum Upload {
     Stored { url: String, bytes: u64 },
     TooBig,
-    /// The backend read it and will not take it, or has no place for it.
+    /// The website read it and will not take it, or has no place for it.
     Refused,
-    /// Offline, signed out, the backend busy: the same replay may go later.
+    /// Offline, signed out, the website busy: the same replay may go later.
     Later,
 }
 
+/// The website's answer: where to put the zip (a short-lived link into its
+/// storage) and the replay's page.
 #[derive(serde::Deserialize)]
-struct PassOk {
-    pass: String,
-}
-
-#[derive(serde::Deserialize)]
-struct Stored {
+struct Started {
+    upload_url: String,
     url: String,
-    #[serde(default)]
-    bytes: u64,
 }
 
 /// What the recording is called in a header: its folder's name, plain.
@@ -252,36 +248,39 @@ fn header_name(dir: &Path) -> String {
     name.chars().map(|c| if c.is_ascii_alphanumeric() || "_.-".contains(c) { c } else { '_' }).take(80).collect()
 }
 
+/// The zip onto the website, with the player's own session (as for reports):
+/// it hands out an upload link and the replay's page, and the zip goes straight
+/// into its storage. The website checks the file when the report arrives.
 async fn upload(ctx: &Ctx, session: &str, dir: &Path, body: Vec<u8>) -> Upload {
     let Ok(client) = crate::auth::client() else { return Upload::Later };
-    // A game pass of the player's own, as for Play: the backend files the replay under them.
-    let pass = match client.post(format!("{}/api/launcher/pass", ctx.site)).bearer_auth(session).send().await {
-        Ok(res) if res.status().is_success() => match res.json::<PassOk>().await {
-            Ok(ok) => ok.pass,
-            Err(_) => return Upload::Later,
-        },
-        // Banned, or the terms changed: no pass to send it with, and the report goes without it.
-        Ok(res) if res.status().as_u16() == 403 => return Upload::Refused,
-        _ => return Upload::Later,
-    };
+    let bytes = body.len() as u64;
     let res = client
-        .post(format!("{}/replays", ctx.backend))
+        .post(format!("{}/api/launcher/replays", ctx.site))
+        .bearer_auth(session)
+        .json(&serde_json::json!({ "name": header_name(dir), "bytes": bytes }))
+        .send()
+        .await;
+    let Ok(res) = res else { return Upload::Later };
+    let started = match res.status().as_u16() {
+        200..=299 => match res.json::<Started>().await {
+            Ok(s) if s.url.starts_with("https://") && s.upload_url.starts_with("http") => s,
+            _ => return Upload::Refused,
+        },
+        413 => return Upload::TooBig,
+        // Signed out, too many this hour, the website or its storage busy.
+        401 | 429 | 500..=599 => return Upload::Later,
+        _ => return Upload::Refused,
+    };
+    let put = client
+        .put(&started.upload_url)
         .timeout(UPLOAD_TIMEOUT)
-        .header("x-sp-pass", pass)
-        .header("x-sp-replay", header_name(dir))
         .header(reqwest::header::CONTENT_TYPE, "application/zip")
         .body(body)
         .send()
         .await;
-    let Ok(res) = res else { return Upload::Later };
-    match res.status().as_u16() {
-        200..=299 => match res.json::<Stored>().await {
-            Ok(stored) if stored.url.starts_with("https://") => Upload::Stored { url: stored.url, bytes: stored.bytes },
-            _ => Upload::Refused,
-        },
-        413 => Upload::TooBig,
-        // Not a zip, or a backend without replays yet.
-        400 | 404 | 411 => Upload::Refused,
+    match put {
+        Ok(res) if res.status().is_success() => Upload::Stored { url: started.url, bytes },
+        // A link that ran out or a storage hiccup: the next pass asks for a new one.
         _ => Upload::Later,
     }
 }
@@ -376,14 +375,18 @@ pub async fn attach(ctx: &Ctx, session: &str, reports: &Path, report: &mut Map<S
 }
 
 // --------------------------------------------- an admin opening a replay ---
-// The staff's link to a reported match opens its page (sp-backend
-// lib/admingateway.js /replay/<id>, after their Discord sign-in), whose "Open in
-// the launcher" is sp-launcher://replay/<id>?t=<token>. Windows hands that to
-// the launcher (lib.rs, the deep-link plugin); after the admin says yes, the
-// replay is downloaded with the token (it works once, for 10 minutes) and
-// unzipped into the game's Demos folder, where the game's Replay menu lists it.
+// The staff's link to a reported match opens its page on the website
+// (superpeople.dev/replays/<id>, no sign-in: the id is the secret), whose "Open
+// in the launcher" is sp-launcher://replay/<id>. Windows hands that to the
+// launcher (lib.rs, the deep-link plugin); after the admin says yes, the replay
+// is downloaded from the website and unzipped into the game's Demos folder,
+// where the game's Replay menu lists it. Replays from before (the admin panel's
+// page, behind its sign-in) come as sp-launcher://replay/<id>?t=<token> and are
+// downloaded from the game backend with that token (it works once, for 10
+// minutes).
 
-/// A replay link: the replay's id and its one-time token.
+/// A replay link: the replay's id, and the one-time token of an admin-panel
+/// link ("" for one from the website).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Link {
     pub id: String,
@@ -394,38 +397,48 @@ fn is_hex(s: &str) -> bool {
     s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// `sp-launcher://replay/<32 hex>?t=<hex>`, or None for anything else.
+/// `sp-launcher://replay/<32 hex>`, or with `?t=<hex>` (an admin-panel link),
+/// or None for anything else.
 pub fn link_of(url: &str) -> Option<Link> {
     let url = tauri::Url::parse(url).ok()?;
     if url.scheme() != "sp-launcher" || url.host_str()? != "replay" {
         return None;
     }
     let id = url.path().trim_matches('/');
-    let token = url.query_pairs().find(|(k, _)| k == "t")?.1.into_owned();
-    let ok = id.len() == 32 && is_hex(id) && (16..=128).contains(&token.len()) && is_hex(&token);
-    ok.then(|| Link { id: id.to_ascii_lowercase(), token })
+    let token = match url.query_pairs().find(|(k, _)| k == "t") {
+        Some((_, t)) => {
+            let t = t.into_owned();
+            if !(16..=128).contains(&t.len()) || !is_hex(&t) {
+                return None;
+            }
+            t
+        }
+        None => String::new(),
+    };
+    (id.len() == 32 && is_hex(id)).then(|| Link { id: id.to_ascii_lowercase(), token })
 }
 
 #[derive(Debug, PartialEq)]
 pub enum Fetched {
     Zip(Vec<u8>),
-    /// Used already, or older than 10 minutes.
+    /// An admin-panel link used already, or older than 10 minutes.
     Expired,
-    /// No longer on the backend (replays are kept 30 days).
+    /// No longer kept (replays are kept 30 days).
     Gone,
     TooBig,
     Failed,
 }
 
-/// The replay's zip, from the game backend, with the link's token.
-pub async fn fetch(backend: &str, link: &Link) -> Fetched {
+/// The replay's zip: from the website (its download sends on to its storage),
+/// or for an admin-panel link from the game backend with the link's token.
+pub async fn fetch(site: &str, backend: &str, link: &Link) -> Fetched {
     let Ok(client) = crate::auth::client() else { return Fetched::Failed };
-    let res = client
-        .get(format!("{backend}/replays/{}/file", link.id))
-        .query(&[("t", link.token.as_str())])
-        .timeout(UPLOAD_TIMEOUT)
-        .send()
-        .await;
+    let req = if link.token.is_empty() {
+        client.get(format!("{site}/replays/{}/download", link.id))
+    } else {
+        client.get(format!("{backend}/replays/{}/file", link.id)).query(&[("t", link.token.as_str())])
+    };
+    let res = req.timeout(UPLOAD_TIMEOUT).send().await;
     let Ok(mut res) = res else { return Fetched::Failed };
     match res.status().as_u16() {
         200 => {}
@@ -686,10 +699,14 @@ mod tests {
         // Windows or a browser may add a slash before the query; the id in capitals is the same id.
         assert_eq!(link_of(&format!("sp-launcher://replay/{ID}/?t={TOKEN}")), want);
         assert_eq!(link_of(&format!("sp-launcher://replay/{}?t={TOKEN}", ID.to_uppercase())), want);
+        // The website's links have no token: the id is the secret.
+        let site = Some(Link { id: ID.into(), token: String::new() });
+        assert_eq!(link_of(&format!("sp-launcher://replay/{ID}")), site);
+        assert_eq!(link_of(&format!("sp-launcher://replay/{ID}/")), site);
         for bad in [
             format!("https://replay/{ID}?t={TOKEN}"),
             format!("sp-launcher://other/{ID}?t={TOKEN}"),
-            format!("sp-launcher://replay/{ID}"),
+            format!("sp-launcher://other/{ID}"),
             format!("sp-launcher://replay/{ID}?t=short"),
             format!("sp-launcher://replay/{ID}?t=not-hex-not-hex-not-hex"),
             format!("sp-launcher://replay/..%2F..%2Fx?t={TOKEN}"),
@@ -698,6 +715,52 @@ mod tests {
         ] {
             assert_eq!(link_of(&bad), None, "{bad}");
         }
+    }
+
+    /// Answers each request with the next (status, extra header line, body), and
+    /// hands back the request lines.
+    async fn answers(replies: Vec<(u16, String, Vec<u8>)>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let task = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for (status, header, body) in replies {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap();
+                seen.push(String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or("").to_string());
+                let mut reply = format!("HTTP/1.1 {status} X\r\n{header}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+                reply.extend_from_slice(&body);
+                let _ = sock.write_all(&reply).await;
+            }
+            seen
+        });
+        (base, task)
+    }
+
+    #[tokio::test]
+    async fn a_website_link_downloads_through_its_redirect_and_an_old_one_with_its_token() {
+        let zip = vec![b'P', b'K', 3, 4, 1, 2, 3];
+        // The website's download sends on to its storage, which has the zip.
+        let (base, server) = answers(vec![]).await;
+        drop(server);
+        let (storage, storage_seen) = answers(vec![(200, "Content-Type: application/zip\r\n".into(), zip.clone())]).await;
+        let (site, site_seen) = answers(vec![(302, format!("Location: {storage}/media/replays/{ID}/kapi.zip?sig=1\r\n"), vec![])]).await;
+        let link = Link { id: ID.into(), token: String::new() };
+        assert_eq!(fetch(&site, &base, &link).await, Fetched::Zip(zip.clone()));
+        assert!(site_seen.await.unwrap()[0].starts_with(&format!("GET /replays/{ID}/download ")));
+        assert!(storage_seen.await.unwrap()[0].starts_with(&format!("GET /media/replays/{ID}/kapi.zip?sig=1 ")));
+
+        // Gone after 30 days.
+        let (site, _) = answers(vec![(404, String::new(), b"gone".to_vec())]).await;
+        assert_eq!(fetch(&site, &base, &link).await, Fetched::Gone);
+
+        // An admin-panel link goes to the game backend with its token.
+        let (backend, backend_seen) = answers(vec![(200, String::new(), zip.clone())]).await;
+        let old = Link { id: ID.into(), token: TOKEN.into() };
+        assert_eq!(fetch("http://127.0.0.1:9", &backend, &old).await, Fetched::Zip(zip));
+        assert!(backend_seen.await.unwrap()[0].starts_with(&format!("GET /replays/{ID}/file?t={TOKEN} ")));
     }
 
     /// A zip of these (name, bytes) entries, as written by anyone.
