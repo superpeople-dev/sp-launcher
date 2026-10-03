@@ -140,6 +140,9 @@ fn set_config(state: State<'_, AppState>, cfg: Config) -> Result<()> {
         account_id: current.account_id.clone(),
         display_name: current.display_name.clone(),
         key_status: current.key_status.clone(),
+        // Client fixes are always on (the console lock and the login ticket
+        // need them); an older frontend's switch cannot turn them off.
+        client_fixes_enabled: true,
         ..cfg
     };
     config::save(&state.config_dir, &cfg)?;
@@ -786,6 +789,17 @@ async fn launch_game(
     } else {
         false
     };
+
+    // The game's console stays on only for an admin, with a token the website
+    // signed (auth::console_token; the client fixes DLL checks it). Asked for
+    // right before the start: it is good for two minutes. Never a reason not to
+    // start: without it the console is simply off.
+    if cfg.profile.as_ref().is_some_and(|p| p.admin) {
+        match auth::console_token(&session).await {
+            Some(token) => env.push(("SP_CONSOLE_PASS".into(), token)),
+            None => eprintln!("[console] no console token from the website -- the game's console stays off"),
+        }
+    }
 
     let mut child = game::launch(game::LaunchSpec {
         install_dir: &cfg.install_dir,

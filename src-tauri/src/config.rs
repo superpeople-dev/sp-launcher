@@ -37,7 +37,9 @@ pub struct Config {
     pub auto_update: bool,
     pub verify_before_launch: bool,
     pub debug_logging: bool,
-    /// Deploy the optional client fixes DLL and signed translation PAK for this launch.
+    /// Deploy the client fixes DLL and signed translation PAK for this launch.
+    /// Always true: the game's console lock and the login ticket
+    /// need the DLL, so a saved false is overridden on load (and in set_config).
     pub client_fixes_enabled: bool,
     /// Show the client fixes DLL's diagnostic console when it is loaded.
     pub client_fixes_debug_window: bool,
@@ -116,6 +118,7 @@ pub fn load(base: &Path) -> Config {
     let path = config_path(base);
     let mut cfg = load_raw(base, &path);
     cfg.launch_args = strip_base_args(&cfg.launch_args);
+    cfg.client_fixes_enabled = true;
     cfg
 }
 
@@ -150,6 +153,16 @@ pub fn save(base: &Path, cfg: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::strip_base_args;
+
+    #[test]
+    fn client_fixes_are_on_even_when_saved_off() {
+        let dir = std::env::temp_dir().join(format!("sp-launcher-cfg-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = super::Config { client_fixes_enabled: false, ..super::Config::default() };
+        super::save(&dir, &cfg).unwrap();
+        assert!(super::load(&dir).client_fixes_enabled);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_old_defaults_are_removed_from_an_existing_config() {
