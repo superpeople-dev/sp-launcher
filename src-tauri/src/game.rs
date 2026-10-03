@@ -91,7 +91,8 @@ pub fn parse_args(raw: &str) -> Vec<String> {
 /// player's settings.
 ///
 /// `-IgnoreCatalogue` skips a catalogue fetch that cannot succeed.
-/// `-ApiPhase` has to match `apiPhase` in the backend config.
+/// The phase (`-ApiPhase`, see `phase_arg`) is not here: it depends on the
+/// player's region.
 /// `-ServicePlatform` names an online-subsystem module: the client appends the
 /// value to "OnlineSubsystem" and loads that. An EMPTY value resolves to
 /// "Internal", which is the client's own account path -- the login screen with
@@ -108,7 +109,6 @@ pub fn parse_args(raw: &str) -> Vec<String> {
 /// break their own install.
 pub const BASE_ARGS: &[&str] = &[
     "-IgnoreCatalogue",
-    "-ApiPhase=\"dev2s\"",
     // Empty on purpose. "Steam" sends the client down the Steam login path,
     // which needs Steam running and an account that owns the game. An EMPTY
     // value resolves to the client's `Internal` subsystem, which is its own
@@ -117,10 +117,28 @@ pub const BASE_ARGS: &[&str] = &[
     "-ServicePlatform=",
 ];
 
+/// The phase names the startup config the game fetches from the backend,
+/// `config-<phase>.enc` (sp-backend files/): `prod` is the live game; `dev`
+/// is the same game with the dev lobby, for players in the Dev region (staff
+/// and invited players), so lobby changes can be tried before they go live.
+pub const PHASE_LIVE: &str = "prod";
+pub const PHASE_DEV: &str = "dev";
+
+/// The phase for a region the backend answered (auth::game_region).
+pub fn phase_for_region(region: &str) -> &'static str {
+    if region == "dev" { PHASE_DEV } else { PHASE_LIVE }
+}
+
+fn phase_arg(phase: &str) -> String {
+    format!("-ApiPhase=\"{phase}\"")
+}
+
 /// Builds the full argv: the server address first (if one was entered in the
-/// connect prompt), then the required arguments, then whatever the player added
-/// on top. Split out from `launch` so it can be tested without spawning.
-fn full_args(server: Option<&str>, user_args: &str) -> Vec<String> {
+/// connect prompt), then the required arguments and the phase, then whatever
+/// the player added on top. A phase among the player's arguments is dropped:
+/// it is the region's, not a preference. Split out from `launch` so it can be
+/// tested without spawning.
+fn full_args(server: Option<&str>, phase: &str, user_args: &str) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(server) = server {
         if !server.is_empty() {
@@ -131,7 +149,8 @@ fn full_args(server: Option<&str>, user_args: &str) -> Vec<String> {
     // one. Unreal's parser takes the FIRST occurrence, so appending ours first
     // and theirs second would silently ignore whatever they typed -- which is
     // the opposite of what an override is for.
-    let user = parse_args(user_args);
+    let phase = phase_arg(phase);
+    let user: Vec<String> = parse_args(user_args).into_iter().filter(|u| !same_switch(u, &phase)).collect();
     for base in BASE_ARGS {
         if EMPTY_VALUE_LAST.contains(base) {
             continue;                       // emitted after the player's args, see below
@@ -140,6 +159,7 @@ fn full_args(server: Option<&str>, user_args: &str) -> Vec<String> {
             args.push((*base).to_string());
         }
     }
+    args.push(phase);
     args.extend(user.clone());
 
     // An argument whose value is EMPTY has to be the last thing on the command
@@ -163,7 +183,7 @@ fn full_args(server: Option<&str>, user_args: &str) -> Vec<String> {
 /// Required arguments whose value is empty, which therefore must come last.
 const EMPTY_VALUE_LAST: &[&str] = &["-ServicePlatform="];
 
-/// Do two tokens set the same switch? `-ApiPhase="dev2s"` and `-ApiPhase=x` do;
+/// Do two tokens set the same switch? `-ApiPhase="prod"` and `-ApiPhase=x` do;
 /// `-ServicePlatform=Steam` and `-ServicePlatform=` do, which is the case that
 /// matters for testing a different platform.
 fn same_switch(a: &str, b: &str) -> bool {
@@ -191,6 +211,8 @@ pub struct LaunchSpec<'a> {
     /// without joining server" — asked fresh on every launch rather than
     /// stored, since who to connect to can change launch to launch.
     pub server: Option<&'a str>,
+    /// `PHASE_LIVE` or `PHASE_DEV` (phase_for_region).
+    pub phase: &'a str,
     pub user_args: &'a str,
 }
 
@@ -209,7 +231,7 @@ pub fn launch(spec: LaunchSpec<'_>) -> Result<std::process::Child> {
     // The backend is reached through hosts redirection, not through arguments,
     // so the rest of the command line is just the (optional) server address
     // plus whatever the user configured.
-    let args: Vec<String> = full_args(spec.server, spec.user_args);
+    let args: Vec<String> = full_args(spec.server, spec.phase, spec.user_args);
 
     let working_dir = exe.parent().ok_or_else(|| {
         LauncherError::Message("game executable has no parent directory".into())
@@ -253,26 +275,53 @@ fn build_command(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_command, detect, full_args, parse_args};
+    use super::{build_command, detect, full_args, parse_args, phase_arg, phase_for_region, PHASE_DEV, PHASE_LIVE};
     use std::ffi::OsStr;
     use std::fs;
     use std::path::Path;
 
     use super::BASE_ARGS;
 
+    /// The required arguments in the order they are emitted for the live phase:
+    /// the base arguments, the phase, and the empty-valued ones last.
     fn base() -> Vec<String> {
-        BASE_ARGS.iter().map(|a| (*a).to_string()).collect()
+        let mut out: Vec<String> = BASE_ARGS.iter().filter(|a| **a != "-ServicePlatform=").map(|a| (*a).to_string()).collect();
+        out.push(phase_arg(PHASE_LIVE));
+        out.push("-ServicePlatform=".to_string());
+        out
+    }
+
+    #[test]
+    fn the_dev_region_starts_the_dev_phase_and_every_other_region_the_live_one() {
+        assert_eq!(phase_for_region("dev"), PHASE_DEV);
+        for region in ["europe", "asia", "northAmerica", ""] {
+            assert_eq!(phase_for_region(region), PHASE_LIVE, "{region}");
+        }
+        let got = full_args(None, PHASE_DEV, "");
+        assert!(got.contains(&"-ApiPhase=\"dev\"".to_string()), "{got:?}");
+        assert!(!got.iter().any(|a| a == "-ApiPhase=\"prod\""), "{got:?}");
+    }
+
+    #[test]
+    fn a_phase_among_the_players_arguments_is_dropped() {
+        // Launchers before 03.10.2026 saved their base arguments (-ApiPhase="dev2s")
+        // into the player's own; that must not keep anyone on the old phase or out
+        // of the dev lobby.
+        let got = full_args(None, PHASE_DEV, "-windowed -ApiPhase=\"dev2s\" -apiphase=prod");
+        assert_eq!(got.iter().filter(|a| a.to_lowercase().starts_with("-apiphase")).count(), 1, "{got:?}");
+        assert!(got.contains(&"-ApiPhase=\"dev\"".to_string()), "{got:?}");
+        assert!(got.contains(&"-windowed".to_string()), "{got:?}");
     }
 
     #[test]
     fn the_required_arguments_are_always_there() {
         // Even with nothing configured and nowhere to connect.
-        assert_eq!(full_args(None, ""), base());
+        assert_eq!(full_args(None, PHASE_LIVE, ""), base());
     }
 
     #[test]
     fn server_address_comes_first_then_the_required_arguments() {
-        let got = full_args(Some("203.0.113.10:27015"), "");
+        let got = full_args(Some("203.0.113.10:27015"), PHASE_LIVE, "");
         assert_eq!(got[0], "203.0.113.10:27015");
         // Same set, but -ServicePlatform= is moved to the end (see below).
         let mut want: Vec<String> = base().into_iter().filter(|a| a != "-ServicePlatform=").collect();
@@ -284,7 +333,7 @@ mod tests {
     fn an_empty_valued_argument_is_last_so_it_cannot_swallow_the_next_one() {
         // The bug this exists to prevent: Unreal read `-loginauto` as the VALUE
         // of `-ServicePlatform=` and tried to load it as a module.
-        let got = full_args(None, "-loginauto -windowed");
+        let got = full_args(None, PHASE_LIVE, "-loginauto -windowed");
         assert_eq!(got.last().unwrap(), "-ServicePlatform=", "{got:?}");
         assert!(got.contains(&"-loginauto".to_string()));
         assert!(got.contains(&"-windowed".to_string()));
@@ -293,7 +342,7 @@ mod tests {
     #[test]
     fn a_player_override_replaces_the_required_argument() {
         // Unreal takes the first occurrence, so ours must not be emitted at all.
-        let got = full_args(None, "-ServicePlatform=Steam");
+        let got = full_args(None, PHASE_LIVE, "-ServicePlatform=Steam");
         assert_eq!(got.iter().filter(|a| a.starts_with("-ServicePlatform")).count(), 1, "{got:?}");
         assert!(got.contains(&"-ServicePlatform=Steam".to_string()), "{got:?}");
         assert!(!got.contains(&"-ServicePlatform=".to_string()), "{got:?}");
@@ -303,13 +352,13 @@ mod tests {
 
     #[test]
     fn an_override_is_matched_regardless_of_value_or_case() {
-        let got = full_args(None, "-serviceplatform=Null");
+        let got = full_args(None, PHASE_LIVE, "-serviceplatform=Null");
         assert_eq!(got.iter().filter(|a| a.to_lowercase().starts_with("-serviceplatform")).count(), 1, "{got:?}");
     }
 
     #[test]
     fn the_players_own_arguments_go_after_the_required_ones() {
-        let got = full_args(None, "-windowed -ResX=1280");
+        let got = full_args(None, PHASE_LIVE, "-windowed -ResX=1280");
         let mut want: Vec<String> = base().into_iter().filter(|a| a != "-ServicePlatform=").collect();
         want.extend(["-windowed".to_string(), "-ResX=1280".to_string()]);
         want.push("-ServicePlatform=".to_string());
@@ -318,14 +367,14 @@ mod tests {
 
     #[test]
     fn an_empty_server_address_is_treated_the_same_as_none() {
-        assert_eq!(full_args(Some(""), "-windowed"), full_args(None, "-windowed"));
+        assert_eq!(full_args(Some(""), PHASE_LIVE, "-windowed"), full_args(None, PHASE_LIVE, "-windowed"));
     }
 
     #[test]
     fn the_service_platform_is_empty_because_that_is_the_account_login_path() {
         // An empty value is NOT the same as omitting the switch: omitting it
         // lets the client pick its configured default, which is Steam.
-        let got = full_args(None, "");
+        let got = full_args(None, PHASE_LIVE, "");
         assert!(got.iter().any(|a| a == "-ServicePlatform="), "{got:?}");
         assert!(!got.iter().any(|a| a == "-ServicePlatform=Steam"), "{got:?}");
     }
@@ -371,7 +420,7 @@ mod tests {
         // On Windows any process can read another's command line; the
         // environment block cannot be read without debug privileges. A ticket
         // in argv would be visible in Task Manager, so this must stay true.
-        let args = full_args(Some("1.2.3.4:7777"), "-IgnoreCatalogue");
+        let args = full_args(Some("1.2.3.4:7777"), PHASE_LIVE, "-IgnoreCatalogue");
         let env = vec![("SP_AUTH_TICKET".to_string(), "secret-token".to_string())];
         let cmd = build_command(Path::new("game.exe"), &args, Path::new("."), &env);
 
@@ -397,7 +446,7 @@ mod tests {
 
     #[test]
     fn the_server_address_still_leads_the_command_line() {
-        let args = full_args(Some("1.2.3.4:7777"), "-a -b");
+        let args = full_args(Some("1.2.3.4:7777"), PHASE_LIVE, "-a -b");
         let env = vec![("SP_AUTH_TICKET".to_string(), "t".to_string())];
         let cmd = build_command(Path::new("game.exe"), &args, Path::new("."), &env);
         let argv: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();

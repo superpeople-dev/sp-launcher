@@ -109,6 +109,9 @@ fn strip_base_args(raw: &str) -> String {
     let kept: Vec<String> = super::game::parse_args(raw)
         .into_iter()
         .filter(|tok| !super::game::BASE_ARGS.iter().any(|b| b.eq_ignore_ascii_case(tok))
+            // The phase is the region's (game::phase_for_region); older launchers
+            // saved -ApiPhase="dev2s" here.
+            && !tok.to_ascii_lowercase().starts_with("-apiphase=")
             && !tok.eq_ignore_ascii_case("-ExecCmds=\"PakFile.SearchRecentlyFoundPaks 0\""))
         .collect();
     kept.join(" ")
