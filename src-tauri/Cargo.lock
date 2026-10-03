@@ -3809,6 +3809,7 @@ dependencies = [
 name = "sp-launcher"
 version = "0.4.0"
 dependencies = [
+ "base64 0.22.1",
  "discord-rich-presence",
  "futures-util",
  "http-body-util",

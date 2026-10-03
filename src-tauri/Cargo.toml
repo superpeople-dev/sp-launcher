@@ -45,6 +45,9 @@ discord-rich-presence = "1.1.0"
 # A reported match's replay, zipped for the staff (replays.rs): deflate only.
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
+# News slide images on plain http, embedded as data: URLs (news.rs).
+base64 = "0.22"
+
 # DPAPI, for storing the launcher key encrypted at rest. Windows-only on
 # purpose: the launcher ships for Windows, and a non-Windows build falls back
 # to a passthrough that auth.rs marks loudly as not being encryption.
