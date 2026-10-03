@@ -729,6 +729,12 @@ async fn launch_game(
         // Environment, not argv: see the note on LaunchSpec::env.
         env.push(("SP_AUTH_TICKET".into(), ticket.token));
     }
+    // The phase from the region the backend has for this player: the Dev region
+    // (staff and invited players) starts the game with the dev lobby, every
+    // other region with the live one (game::phase_for_region). Asked here, with
+    // the other checks, before anything with a side effect.
+    let region = auth::game_region(&session, None).await.map_err(|e| expired(&app, &state, e))?;
+    let phase = game::phase_for_region(&region.region);
 
     // Prepare optional session-owned fixes before starting the game. Early
     // failures roll deployment back through the session guard.
@@ -804,6 +810,7 @@ async fn launch_game(
     let mut child = game::launch(game::LaunchSpec {
         install_dir: &cfg.install_dir,
         server: server.as_deref(),
+        phase,
         user_args: &cfg.launch_args,
         env: &env,
     })?;
