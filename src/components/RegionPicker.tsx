@@ -26,22 +26,50 @@ const NAMES: Record<string, string> = {
 
 const servers = (n: number) => (n === 1 ? "1 server" : `${n} servers`);
 
+// The backend's last answer, so the picker is there at once, as it was, when the Play tab shows again
+// or the launcher starts (and refreshed behind it), instead of appearing a moment later. Kept on this
+// PC; forgotten on sign-out (forgetRegion), as it is the account's.
+const KEY = "sp.region";
+let last: GameRegion | null = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(KEY) ?? "null");
+    return saved && typeof saved.region === "string" && saved.regions && typeof saved.regions === "object" ? saved : null;
+  } catch {
+    return null;
+  }
+})();
+function remember(got: GameRegion | null) {
+  last = got;
+  try {
+    if (got) localStorage.setItem(KEY, JSON.stringify(got));
+    else localStorage.removeItem(KEY);
+  } catch {
+    /* no storage: only this run remembers */
+  }
+}
+export const forgetRegion = () => remember(null);
+
 /**
  * Next to Play: the region the player's matches are in (account_region in lib.rs). Every match is in one
- * region, so there is no "Any": only the regions with servers right now (Europe for now; more as they get
- * servers). Without a pick the backend answers Europe. Hidden until the backend answers, and when it has
- * no regions (an older backend, or the sign-in pass was refused: Play says why). Dev shows last, and only
- * for a player the backend lists it for (read once, when the launcher starts or reloads).
+ * region, so there is no "Any": only the regions with servers right now. Without a pick the backend
+ * answers the region nearest the player that has servers. Shows the last answer at once and asks again
+ * behind it; hidden only before the first answer ever, and when there are no regions (an older backend).
+ * A failed refresh keeps what was shown. Dev shows last, and only for a player the backend lists it for.
  */
 export function RegionPicker({ onError }: Props) {
-  const [state, setState] = useState<GameRegion | null>(null);
+  const [state, setState] = useState<GameRegion | null>(last);
   const [saving, setSaving] = useState<string | null>(null);
 
   useEffect(() => {
     let live = true;
     invoke<GameRegion>("account_region")
-      .then((got) => live && setState(got))
-      .catch(() => live && setState(null));
+      .then((got) => {
+        remember(got);
+        if (live) setState(got);
+      })
+      .catch(() => {
+        /* offline, or the pass was refused (Play says why): keep the last answer */
+      });
     return () => {
       live = false;
     };
@@ -55,7 +83,9 @@ export function RegionPicker({ onError }: Props) {
     if (region === state.region || saving) return;
     setSaving(region);
     try {
-      setState(await invoke<GameRegion>("account_region", { region }));
+      const got = await invoke<GameRegion>("account_region", { region });
+      remember(got);
+      setState(got);
     } catch (e) {
       onError(String(e));
     } finally {

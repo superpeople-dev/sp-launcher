@@ -12,6 +12,7 @@ import { DownloadPanel } from "./components/DownloadPanel";
 import { Welcome } from "./components/Welcome";
 import { TermsDialog } from "./components/TermsDialog";
 import { ReplayDialog } from "./components/ReplayDialog";
+import { forgetRegion } from "./components/RegionPicker";
 import { BanDialog, bannedLine } from "./components/BanNotice";
 import { IdeasPanel } from "./components/community/IdeasPanel";
 import { RoadmapPanel } from "./components/community/RoadmapPanel";
@@ -560,6 +561,7 @@ export default function App() {
   const signOut = async () => {
     try {
       await invoke("sign_out");
+      forgetRegion();
       setProfile(null);
       setAuthError(null);
       setTab("play");
