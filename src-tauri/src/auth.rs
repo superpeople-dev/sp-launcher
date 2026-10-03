@@ -145,6 +145,11 @@ struct PassOk {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct ConsoleOk {
+    token: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct TicketOk {
     #[serde(default)]
     token: String,
@@ -443,6 +448,28 @@ pub async fn game_pass(session: &str) -> Result<String> {
         503 => Err(LauncherError::Message(explain("NOT_ENABLED", None))),
         other => Err(LauncherError::Message(http_error("website", &other.to_string()))),
     }
+}
+
+/// The game's console for an admin (sp-website app/api/launcher/console): a
+/// token the website signed, which the client fixes DLL checks before it keeps
+/// the console on (sp-native client-fixes console_lock). None for everyone else
+/// and on any failure: the game then starts with its console off, never not at all.
+pub async fn console_token(session: &str) -> Option<String> {
+    let url = format!("{}/api/launcher/console", site_url());
+    let res = send(client().ok()?.post(url).bearer_auth(session)).await.ok()?;
+    if res.status().as_u16() != 200 {
+        return None;
+    }
+    let token = res.json::<ConsoleOk>().await.ok()?.token;
+    console_token_shape(&token).then_some(token)
+}
+
+/// base64url "." base64url and nothing else, so nothing odd reaches the game's
+/// environment.
+fn console_token_shape(token: &str) -> bool {
+    let mut parts = token.split('.');
+    let ok = |p: Option<&str>| p.is_some_and(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
+    token.len() <= 4096 && ok(parts.next()) && ok(parts.next()) && parts.next().is_none()
 }
 
 /// Hands the pass to the game backend, which answers with the ticket the game
@@ -783,6 +810,19 @@ pub fn new_device_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_console_token_is_base64url_dot_base64url() {
+        assert!(console_token_shape("eyJkIjoiMSJ9.WlJLGz8fvlT6TCzr-_"));
+        assert!(!console_token_shape(""));
+        assert!(!console_token_shape("eyJkIjoiMSJ9"));
+        assert!(!console_token_shape("eyJkIjoiMSJ9."));
+        assert!(!console_token_shape("a.b.c"));
+        assert!(!console_token_shape("a b.c"));
+        assert!(!console_token_shape("a.b
+"));
+        assert!(!console_token_shape(&format!("{}.b", "a".repeat(4096))));
+    }
 
     #[test]
     fn pkce_matches_the_rfc_example() {

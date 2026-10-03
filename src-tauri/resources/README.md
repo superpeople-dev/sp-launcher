@@ -20,8 +20,8 @@ with access to sp-native; the release workflow uses the `SP_NATIVE_TOKEN` secret
   passes `-ServicePlatform=`, and without this DLL intercepting the game's
   request for the Steam online subsystem, the client waits forever for a Steam
   that is not running — the loading screen that never ends.
-- **SPClientFixes.dll** and the **PAK/.sig pair** are loaded only when
-  Settings → Client fixes is on. All three are embedded together; an
+- **SPClientFixes.dll** and the **PAK/.sig pair** are loaded at every launch
+  (client fixes are always on). All three are embedded together; an
   incomplete set disables the bundle.
 
 `build.rs` checks for these files. If they are absent the launcher still

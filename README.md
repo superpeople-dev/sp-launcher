@@ -30,7 +30,7 @@ Rust backend. Windows only.
   signed-in Discord account (`src-tauri/src/community.rs`,
   `src/components/community/`).
 - **In-game reports.** The game's own Report button (death cam, spectating)
-  reaches the staff. With Client fixes on, the DLL writes each report into the
+  reaches the staff. The client fixes DLL writes each report into the
   launcher's `reports` folder (named to the game in `SP_REPORT_DIR`); while the
   game runs, the launcher sends it to superpeople.dev as the signed-in
   account, and the site posts it to the staff's Discord channel. A report the
@@ -104,8 +104,13 @@ Rust backend. Windows only.
 
 ## Client fixes
 
-**Apply client fixes** is on by default and can be switched off in Settings.
-The bundle targets development build `1.3.0.473797`: the launcher checks the
+Client fixes are always on; Settings no longer has a switch for them, and an
+"off" saved by an older launcher is overridden. The game's console lock and the
+login ticket depend on the DLL. The game's console (F6) is off for everyone but
+the admins: right before the start, an admin's launcher asks the website for a
+signed console token (`POST /api/launcher/console`) and hands it to the game as
+`SP_CONSOLE_PASS`, and the DLL keeps the console on only with a valid one
+(sp-native `client-fixes/src/console_lock.cpp`). The bundle targets development build `1.3.0.473797`: the launcher checks the
 game executable before deploying the DLL and the matched signed PAK/`.sig` pair.
 The optional debug window is off by default. The no-Steam proxy is separate.
 
