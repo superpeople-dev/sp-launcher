@@ -699,11 +699,12 @@
 .twitch__title{ font-family: var(--read); font-size: 12px; color: var(--paper-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .twitch__stats{ display:flex; align-items:center; gap: 6px; flex: none; font-family: var(--read); font-size: 12px; color: var(--paper-dim); white-space:nowrap; }
 .twitch__dot{ width: 7px; height: 7px; border-radius: 50%; background: var(--signal); }
-.twitch__about{ display:flex; flex-direction:column; gap: 8px; min-height: 0; overflow-y: auto; padding-right: 2px; }
+.twitch__about{ display:flex; flex-direction:column; gap: 8px; min-height: 0; overflow-y: auto; padding: 0 2px 6px 0; }
 .twitch__bio{ margin:0; font-family: var(--read); font-size: 12px; line-height: 1.45; color: var(--paper-dim); white-space: pre-line; overflow-wrap: anywhere; }
 .twitch__facts{ list-style:none; margin:0; padding:0; display:flex; flex-wrap: wrap; gap: 6px; }
 .twitch__fact, .twitch__tag{ padding: 2px 8px; border: 1px solid var(--line-soft); font-family: var(--read); font-size: 11px; color: var(--paper-dim); white-space: nowrap; }
 .twitch__tag{ border-color: rgba(145,70,255,0.45); color: #c9b0ff; }
+.twitch__clips{ display:flex; flex-direction:column; gap: 7px; }
 .twitch__sub{ margin: 2px 0 0; font-size: 12px; font-weight: 900; letter-spacing: 0.08em; text-transform: uppercase; color: #fff; }
 .twitch__cliplist{ list-style:none; margin:0; padding:0; display:grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .clip{ display:flex; flex-direction:column; gap: 3px; width: 100%; padding: 0; border: 0; background: none; color: inherit; text-align: left; cursor: pointer; }
