@@ -851,6 +851,7 @@ async fn launch_game(
                 tokio::time::sleep(reports::EVERY).await;
                 let closed = running_pid.lock().map(|running| *running != Some(pid)).unwrap_or(true);
                 reports::send_pending(&session, &dir, !closed).await;
+                reports::send_tamper(&session, &dir).await;
                 if closed {
                     break;
                 }

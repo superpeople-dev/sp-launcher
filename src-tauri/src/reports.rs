@@ -41,13 +41,15 @@ pub fn prepare(config_dir: &Path) -> Option<PathBuf> {
     Some(dir)
 }
 
-/// The reports waiting, oldest first (the DLL names them by the time they were
-/// made). A `.part` file is one the DLL is still writing.
-fn pending(dir: &Path) -> Vec<PathBuf> {
+/// The files waiting with a given name prefix, oldest first (the DLL names them
+/// by the time they were made). A `.part` file is one the DLL is still writing.
+/// Player reports are `report-*.json`; anti-tamper notices `tamper-*.json`.
+fn pending(dir: &Path, prefix: &str) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut files: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .filter(|path| path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(prefix)))
         .collect();
     files.sort();
     files
@@ -74,7 +76,7 @@ async fn send_all(url: &str, session: &str, dir: &Path, busy: &AtomicBool, ctx: 
     }
     let mut sent = 0;
     if let Ok(client) = crate::auth::client() {
-        for file in pending(dir) {
+        for file in pending(dir, "report-") {
             match send_one(&client, url, session, &file, ctx).await {
                 Outcome::Sent => {
                     sent += 1;
@@ -89,6 +91,61 @@ async fn send_all(url: &str, session: &str, dir: &Path, busy: &AtomicBool, ctx: 
     }
     busy.store(false, Ordering::Release);
     sent
+}
+
+/// One anti-tamper pass at a time (same reasoning as SENDING).
+static TAMPER_SENDING: AtomicBool = AtomicBool::new(false);
+
+/// Sends the anti-tamper notices the DLL left (`tamper-*.json`) to the site's
+/// tamper endpoint, as the signed-in account -- so a notice only ever concerns
+/// the player who sent it. Simpler than a report: no replay, no match wait.
+pub async fn send_tamper(session: &str, dir: &Path) -> usize {
+    if TAMPER_SENDING.swap(true, Ordering::AcqRel) {
+        return 0;
+    }
+    let url = format!("{}/api/launcher/tamper", crate::auth::site_url());
+    let mut sent = 0;
+    if let Ok(client) = crate::auth::client() {
+        for file in pending(dir, "tamper-") {
+            match send_tamper_one(&client, &url, session, &file).await {
+                Outcome::Sent => {
+                    sent += 1;
+                    let _ = std::fs::remove_file(&file);
+                }
+                Outcome::Dropped => {
+                    let _ = std::fs::remove_file(&file);
+                }
+                Outcome::Later => break,
+            }
+        }
+    }
+    TAMPER_SENDING.store(false, Ordering::Release);
+    sent
+}
+
+async fn send_tamper_one(client: &reqwest::Client, url: &str, session: &str, file: &Path) -> Outcome {
+    let Ok(meta) = std::fs::metadata(file) else { return Outcome::Dropped };
+    let old = meta
+        .modified()
+        .ok()
+        .and_then(|made| SystemTime::now().duration_since(made).ok())
+        .is_some_and(|age| age > MAX_AGE);
+    if old || meta.len() > MAX_BYTES {
+        return Outcome::Dropped;
+    }
+    let Ok(text) = std::fs::read_to_string(file) else { return Outcome::Dropped };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { return Outcome::Dropped };
+    if !value.is_object() {
+        return Outcome::Dropped;
+    }
+    let Ok(res) = client.post(url).bearer_auth(session).json(&value).send().await else {
+        return Outcome::Later;
+    };
+    match res.status().as_u16() {
+        200..=299 => Outcome::Sent,
+        400 | 413 | 422 => Outcome::Dropped,
+        _ => Outcome::Later,
+    }
 }
 
 /// When the report was made: the DLL names the file after it
@@ -386,6 +443,22 @@ mod tests {
         let dir = prepare(config.path()).expect("folder");
         assert_eq!(dir, config.path().join("reports"));
         assert!(dir.is_dir());
-        assert!(pending(&dir).is_empty());
+        assert!(pending(&dir, "report-").is_empty());
+        assert!(pending(&dir, "tamper-").is_empty());
+    }
+
+    #[test]
+    fn pending_keeps_reports_and_tamper_apart() {
+        let config = tempfile::tempdir().unwrap();
+        let dir = prepare(config.path()).expect("folder");
+        std::fs::write(dir.join("report-1-2-1.json"), "{}").unwrap();
+        std::fs::write(dir.join("tamper-1-2-1.json"), "{}").unwrap();
+        std::fs::write(dir.join("report-2-2-1.json.part"), "{}").unwrap();
+        let reports = pending(&dir, "report-");
+        let tamper = pending(&dir, "tamper-");
+        assert_eq!(reports.len(), 1, "only the finished report, not the .part");
+        assert!(reports[0].file_name().unwrap().to_str().unwrap().starts_with("report-"));
+        assert_eq!(tamper.len(), 1);
+        assert!(tamper[0].file_name().unwrap().to_str().unwrap().starts_with("tamper-"));
     }
 }
