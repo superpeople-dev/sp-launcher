@@ -185,12 +185,11 @@ export function day(ms: number): string {
   return date.toLocaleDateString("en-US", { day: "numeric", month: "short", year: thisYear ? undefined : "numeric" });
 }
 
-/** "Sep 29" and, when it is not this year, the year on its own (Completed shows it under the day). */
-export function dayAndYear(ms: number): { day: string; year: string | null } {
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "3 Oct 2026": day, month, year, always with the year (Completed's dates). Built by hand:
+ *  en-GB writes September as "Sept", out of step with the other three-letter months. */
+export function fullDay(ms: number): string {
   const date = new Date(ms);
-  const year = date.getFullYear();
-  return {
-    day: date.toLocaleDateString("en-US", { day: "numeric", month: "short" }),
-    year: year === new Date().getFullYear() ? null : String(year),
-  };
+  return `${date.getDate()} ${MONTHS[date.getMonth()]} ${date.getFullYear()}`;
 }

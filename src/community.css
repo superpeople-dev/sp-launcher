@@ -581,8 +581,7 @@
   transition: border-color .15s ease, background .15s ease;
 }
 .entry:hover{ border-color: rgba(61,220,132,0.4); background: linear-gradient(150deg, rgba(30,52,42,0.5), rgba(11,16,23,0.4)); }
-.entry__date{ padding-top: 1px; font-size: 12.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap; color: var(--paper-dim); }
-.entry__year{ display:block; margin-top: 2px; font-size: 11px; font-weight: 700; color: var(--muted); }
+.entry__date{ padding-top: 1px; font-size: 12.5px; font-weight: 400; letter-spacing: 0.02em; white-space: nowrap; color: var(--paper-dim); }
 .entry__main{ display:flex; flex-direction:column; gap: 5px; min-width:0; }
 .entry__title{ font-family: var(--read); font-size: 14px; font-weight: 700; line-height: 1.35; color: #fff; }
 .entry__desc{

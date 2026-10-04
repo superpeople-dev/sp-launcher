@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { dayAndYear } from "../../lib/community";
+import { fullDay } from "../../lib/community";
 import type { Profile } from "../../types";
 import { ItemDetail } from "./ItemDetail";
 import { Tag } from "./Tag";
@@ -57,14 +57,10 @@ export function CompletedPanel({ me, onError, onNotice }: Props) {
           {items === null
             ? Array.from({ length: PAGE }, (_, i) => <li key={i} className="entry entry--ghost" />)
             : done.slice(0, shown).map((item) => {
-                const when = dayAndYear(item.completedAt ?? item.createdAt);
                 return (
                   <li key={item.id}>
                     <button type="button" className="entry" onClick={() => setOpen(item.id)}>
-                      <span className="entry__date">
-                        {when.day}
-                        {when.year && <span className="entry__year">{when.year}</span>}
-                      </span>
+                      <span className="entry__date">{fullDay(item.completedAt ?? item.createdAt)}</span>
                       <span className="entry__main">
                         <span className="entry__title">{item.title}</span>
                         {item.description && <span className="entry__desc">{item.description}</span>}
