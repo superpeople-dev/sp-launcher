@@ -56,6 +56,20 @@ pub fn site_url() -> String {
 /// so rather than look like a freeze.
 const TIMEOUT_SECS: u64 = 10;
 
+/// This launcher's version, sent with every call (`identified`): the website
+/// and the game backend refuse Play to a launcher older than the one they
+/// require (sp-website lib/launcher.ts LAUNCHER_MIN_VERSION, sp-backend
+/// launcher.minLauncherVersion), so it updates first.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// A client that says which launcher it is: `User-Agent: SP-Launcher/<version>`
+/// and `X-SP-Launcher: <version>`.
+fn identified(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("X-SP-Launcher", reqwest::header::HeaderValue::from_static(VERSION));
+    builder.user_agent(concat!("SP-Launcher/", env!("CARGO_PKG_VERSION"))).default_headers(headers)
+}
+
 // ---------------------------------------------------------------- types ---
 
 /// The signed-in player, as Discord knows them. Shown throughout the launcher;
@@ -166,7 +180,14 @@ struct ApiError {
     /// Why a suspension or ban was made (sp-backend /session/discord).
     #[serde(default)]
     why: Option<String>,
+    /// The website's machine-readable code next to its sentence in `error`:
+    /// "update" when this launcher is older than it requires.
+    #[serde(default)]
+    code: String,
 }
+
+/// The game backend's answer to a launcher older than it requires.
+const OUTDATED: &str = "LAUNCHER_OUTDATED";
 
 /// The region the player's matches are in (one of `regions`; every match is in
 /// one region), and the regions with servers now with how many each
@@ -318,7 +339,7 @@ pub fn sign_in_url(challenge: &str) -> String {
 /// would show an error page in the Discord window, so it is checked before the
 /// window opens and said on the welcome screen instead.
 pub async fn check_sign_in(url: &str) -> Result<()> {
-    let client = reqwest::Client::builder()
+    let client = identified(reqwest::Client::builder())
         .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -439,12 +460,19 @@ pub async fn game_pass(session: &str) -> Result<String> {
         401 => Err(LauncherError::SignedOut),
         // The website insists on the terms too (LAUNCHER_TERMS_REQUIRED), and
         // they changed since this launcher last asked.
-        403 => match res.json::<ApiError>().await.unwrap_or_default().error.as_str() {
-            "terms" => Err(LauncherError::TermsRequired),
-            "banned" => Err(LauncherError::Message(BANNED.into())),
-            "" => Err(LauncherError::Message(http_error("website", "403"))),
-            other => Err(LauncherError::Message(format!("The website did not let you play ({other}). Try again in a moment, or ask in Discord."))),
-        },
+        403 => {
+            let err = res.json::<ApiError>().await.unwrap_or_default();
+            // Too old a launcher: it updates (lib.rs update_first), then Play works.
+            if err.code == "update" {
+                return Err(LauncherError::UpdateRequired);
+            }
+            match err.error.as_str() {
+                "terms" => Err(LauncherError::TermsRequired),
+                "banned" => Err(LauncherError::Message(BANNED.into())),
+                "" => Err(LauncherError::Message(http_error("website", "403"))),
+                other => Err(LauncherError::Message(format!("The website did not let you play ({other}). Try again in a moment, or ask in Discord."))),
+            }
+        }
         503 => Err(LauncherError::Message(explain("NOT_ENABLED", None))),
         other => Err(LauncherError::Message(http_error("website", &other.to_string()))),
     }
@@ -487,6 +515,9 @@ pub async fn discord_launch(pass: &str, device_id: &str, pc: &pcid::Codes) -> Re
         return Ok(Ticket { token: ok.token, expires_in: ok.expires_in });
     }
     let err: ApiError = serde_json::from_str(&text).unwrap_or_default();
+    if err.error == OUTDATED {
+        return Err(LauncherError::UpdateRequired);
+    }
     let code = if err.error.is_empty() { format!("HTTP_{}", status.as_u16()) } else { err.error };
     let message = explain(&code, err.until.as_deref());
     Err(LauncherError::Message(match err.why.as_deref().map(str::trim) {
@@ -509,6 +540,9 @@ pub async fn game_name(session: &str, name: Option<&str>) -> Result<GameName> {
         return serde_json::from_str(&text).map_err(|_| LauncherError::Message(OOPS.into()));
     }
     let err: ApiError = serde_json::from_str(&text).unwrap_or_default();
+    if err.error == OUTDATED {
+        return Err(LauncherError::UpdateRequired);
+    }
     // A backend from before the route: a 404 without a code of ours.
     if status.as_u16() == 404 && err.error.is_empty() {
         return Err(LauncherError::Message("The game server can't change names yet. Try again later.".into()));
@@ -535,6 +569,9 @@ pub async fn game_region(session: &str, region: Option<&str>) -> Result<GameRegi
         return serde_json::from_str(&text).map_err(|_| LauncherError::Message(OOPS.into()));
     }
     let err: ApiError = serde_json::from_str(&text).unwrap_or_default();
+    if err.error == OUTDATED {
+        return Err(LauncherError::UpdateRequired);
+    }
     // A backend from before regions: no regions, so the picker stays hidden.
     if status.as_u16() == 404 && err.error.is_empty() {
         return Ok(GameRegion { region: String::new(), regions: Default::default() });
@@ -608,7 +645,7 @@ impl reqwest::dns::Resolve for Ipv4Only {
 }
 
 fn ipv4_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    identified(reqwest::Client::builder())
         .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
         .dns_resolver(std::sync::Arc::new(Ipv4Only))
         .build()
@@ -626,7 +663,7 @@ pub async fn signed_out(session: &str) {
 // ------------------------------------------------------------ http calls ---
 
 pub fn client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    identified(reqwest::Client::builder())
         .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
         .build()
         .map_err(LauncherError::Http)

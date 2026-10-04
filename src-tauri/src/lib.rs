@@ -358,7 +358,7 @@ fn expired(app: &AppHandle, state: &State<'_, AppState>, error: LauncherError) -
 #[tauri::command]
 async fn account_name(app: AppHandle, state: State<'_, AppState>, name: Option<String>) -> Result<auth::GameName> {
     let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
-    auth::game_name(&session, name.as_deref()).await.map_err(|e| expired(&app, &state, e))
+    auth::game_name(&session, name.as_deref()).await.map_err(|e| update_first(&app, expired(&app, &state, e)))
 }
 
 /// The season's top 100 of each mode (leaderboard.rs); None while the backend
@@ -373,7 +373,7 @@ async fn leaderboard() -> Result<Option<leaderboard::Board>> {
 #[tauri::command]
 async fn account_region(app: AppHandle, state: State<'_, AppState>, region: Option<String>) -> Result<auth::GameRegion> {
     let session = require_session(&state).map_err(|e| expired(&app, &state, e))?;
-    auth::game_region(&session, region.as_deref()).await.map_err(|e| expired(&app, &state, e))
+    auth::game_region(&session, region.as_deref()).await.map_err(|e| update_first(&app, expired(&app, &state, e)))
 }
 
 /// Who is live on Twitch in the SUPER PEOPLE category (twitch.rs).
@@ -581,6 +581,15 @@ fn terms_first(app: &AppHandle, error: LauncherError) -> LauncherError {
     if matches!(error, LauncherError::TermsRequired) {
         let _ = app.emit("terms:required", ());
     }
+    update_first(app, error)
+}
+
+/// Passes an error through; "too old a launcher" also has the UI install the
+/// update (App.tsx, launcher:outdated).
+fn update_first(app: &AppHandle, error: LauncherError) -> LauncherError {
+    if matches!(error, LauncherError::UpdateRequired) {
+        let _ = app.emit("launcher:outdated", ());
+    }
     error
 }
 
@@ -720,7 +729,7 @@ async fn launch_game(
             .await
             .unwrap_or_default();
         let pass = auth::game_pass(&session).await.map_err(|e| terms_first(&app, expired(&app, &state, e)))?;
-        let ticket = auth::discord_launch(&pass, &device_id, &pc).await?;
+        let ticket = auth::discord_launch(&pass, &device_id, &pc).await.map_err(|e| update_first(&app, e))?;
         if cfg.debug_logging {
             // The lifetime, never the token. A ticket in a log file is a ticket
             // someone else can use for the next minute.

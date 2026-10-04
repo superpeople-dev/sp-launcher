@@ -353,6 +353,8 @@ export default function App() {
     installingRef.current = true;
     setInstallingUpdate(true);
     setUpdateProgress(null);
+    // Its progress shows where an error would (Play's "out of date", say).
+    setError(null);
     // A running download or Verify files first stops where it is, its files
     // closed; the updated launcher continues it.
     const paused = await invoke<boolean>("download_pause_for_update").catch(() => false);
@@ -368,6 +370,15 @@ export default function App() {
       if (paused) resumeDownload();
     }
   }, [update, resumeDownload]);
+
+  // Updates are not optional: one that is found installs at once, unless the
+  // game is running (the launcher looks after it until it exits), then as soon
+  // as it has. The website and the game server refuse Play to a launcher older
+  // than they require, so a skipped update would only end in that refusal.
+  useEffect(() => {
+    if (!update || busy || installingRef.current) return;
+    void runUpdateInstall();
+  }, [update, busy, runUpdateInstall]);
 
   // After a launcher update: the download it paused continues, once the player
   // is signed in (the website wants the sign-in for each file's link).
@@ -426,6 +437,12 @@ export default function App() {
       // Play found the terms not accepted (they changed since the launcher
       // last asked): show the current ones.
       listen("terms:required", () => loadTerms(true)),
+      // Play found this launcher older than the website or the game server
+      // requires (lib.rs update_first): look for the update now; the effect
+      // above installs it.
+      listen("launcher:outdated", () => {
+        if (!installingRef.current) runUpdateCheck(false);
+      }),
       // Play found files that are not the official ones: the button becomes
       // Verify files.
       listen<GameFiles>("files:changed", (e) => setFiles(e.payload)),
@@ -435,7 +452,7 @@ export default function App() {
     return () => {
       unlisten.forEach((p) => void p.then((off) => off()));
     };
-  }, [loadTerms]);
+  }, [loadTerms, runUpdateCheck]);
 
   const patchConfig = useCallback((patch: Partial<Config>) => {
     setConfig((prev) => {
@@ -717,13 +734,14 @@ export default function App() {
             </span>
           ) : (
             <span className="field__row" style={{ alignItems: "center" }}>
-              <span style={{ marginRight: 10 }}>Update available: v{update.version}</span>
-              <button className="btn btn--primary" type="button" onClick={runUpdateInstall}>
-                Install &amp; Restart
-              </button>
-              <button className="btn" type="button" onClick={() => setUpdate(null)}>
-                Later
-              </button>
+              <span style={{ marginRight: 10 }}>
+                {busy ? `Update v${update.version} installs when the game closes` : `Update available: v${update.version}`}
+              </span>
+              {!busy && (
+                <button className="btn btn--primary" type="button" onClick={runUpdateInstall}>
+                  Install &amp; Restart
+                </button>
+              )}
             </span>
           )}
         </div>
