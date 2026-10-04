@@ -12,6 +12,7 @@ import { DownloadPanel } from "./components/DownloadPanel";
 import { Welcome } from "./components/Welcome";
 import { TermsDialog } from "./components/TermsDialog";
 import { ReplayDialog } from "./components/ReplayDialog";
+import { SmartAppControlDialog } from "./components/SmartAppControlDialog";
 import { forgetRegion } from "./components/RegionPicker";
 import { BanDialog, bannedLine } from "./components/BanNotice";
 import { IdeasPanel } from "./components/community/IdeasPanel";
@@ -84,6 +85,8 @@ export default function App() {
   // A reported match opened from its page (sp-launcher://replay/..., lib.rs replay_link): its id
   // while the admin is asked whether to add it to the game's replays.
   const [replayLink, setReplayLink] = useState<string | null>(null);
+  // Play found Windows' Smart App Control blocking the game's DLLs (smart_app_control.rs).
+  const [smartAppControl, setSmartAppControl] = useState(false);
 
   const [appVersion, setAppVersion] = useState("");
   const [update, setUpdate] = useState<Update | null>(null);
@@ -448,6 +451,11 @@ export default function App() {
       listen<GameFiles>("files:changed", (e) => setFiles(e.payload)),
       // A replay link opened while the launcher runs.
       listen<string>("replay:link", (e) => setReplayLink(e.payload)),
+      // Play found Smart App Control on and our DLLs not signed: the window says why and what to do.
+      listen("windows:smart-app-control", () => {
+        setError(null);
+        setSmartAppControl(true);
+      }),
     ];
     return () => {
       unlisten.forEach((p) => void p.then((off) => off()));
@@ -706,6 +714,7 @@ export default function App() {
       )}
 
       {replayLink && <ReplayDialog key={replayLink} onClose={() => setReplayLink(null)} />}
+      {smartAppControl && <SmartAppControlDialog onClose={() => setSmartAppControl(false)} />}
 
       {profile && ban && !ban.permanent && banDialog && (
         <BanDialog ban={ban} why={banDialog} onClose={() => setBanDialog(null)} />

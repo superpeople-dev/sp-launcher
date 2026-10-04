@@ -30,6 +30,10 @@ pub enum LauncherError {
     /// VERSION). lib.rs tells the UI, which installs the update.
     #[error("This launcher is out of date. It is updating now; if it does not, close it and open it again.")]
     UpdateRequired,
+    /// Windows' Smart App Control would refuse one of the game's community
+    /// DLLs (smart_app_control.rs). lib.rs tells the UI, which explains it.
+    #[error("Windows Smart App Control is blocking the game. The launcher shows what to do.")]
+    SmartAppControl,
 }
 
 impl Serialize for LauncherError {
