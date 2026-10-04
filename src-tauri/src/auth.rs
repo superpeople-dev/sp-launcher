@@ -88,6 +88,19 @@ pub struct Profile {
     /// "review", "manage", "comments", "bans" (sp-website lib/board.ts).
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// What they are on the team: "admin", "moderator", "developer" (sp-website
+    /// lib/staff.ts). Websites before a31b3de send none.
+    #[serde(default)]
+    pub staff: Vec<String>,
+}
+
+impl Profile {
+    /// An admin, moderator or developer: only they see and get the client
+    /// fixes debug window. Like `admin`, this only decides what the launcher
+    /// shows; nothing the website grants depends on it.
+    pub fn is_staff(&self) -> bool {
+        self.admin || !self.staff.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -847,6 +860,16 @@ pub fn new_device_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staff_are_admins_moderators_and_developers() {
+        let player: Profile = serde_json::from_str(r#"{"id":"1","name":"P","username":"p","admin":false,"permissions":[],"staff":[]}"#).unwrap();
+        let moderator: Profile = serde_json::from_str(r#"{"id":"2","name":"M","username":"m","admin":false,"permissions":[],"staff":["moderator"]}"#).unwrap();
+        let admin: Profile = serde_json::from_str(r#"{"id":"3","name":"A","username":"a","admin":true,"permissions":[],"staff":["admin"]}"#).unwrap();
+        // A website before the staff kinds sends no "staff": a player then, an admin still by `admin`.
+        let old: Profile = serde_json::from_str(r#"{"id":"4","name":"O","username":"o","admin":false}"#).unwrap();
+        assert!(!player.is_staff() && moderator.is_staff() && admin.is_staff() && !old.is_staff());
+    }
 
     #[test]
     fn a_console_token_is_base64url_dot_base64url() {

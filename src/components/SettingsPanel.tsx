@@ -1,5 +1,5 @@
 import type { Update } from "@tauri-apps/plugin-updater";
-import type { Config, HostsStatus, Profile } from "../types";
+import { isStaff, type Config, type HostsStatus, type Profile } from "../types";
 import { Avatar } from "./community/Avatar";
 import { DISCORD_PATH } from "./Welcome";
 import { pickInstallFolder } from "../lib/browse";
@@ -26,7 +26,7 @@ const TOGGLES: { key: keyof Config; name: string; hint: string }[] = [
   { key: "close_on_launch", name: "Minimize to tray on launch", hint: "Send the launcher to the tray once the game starts, instead of staying open" },
 ];
 // Client fixes are always on (the game's console lock and the login ticket need them), so they
-// are not a setting any more; only their debug window is.
+// are not a setting any more; only their debug window is, and only for the staff.
 
 export function SettingsPanel({
   config,
@@ -205,20 +205,23 @@ export function SettingsPanel({
             />
           </div>
         ))}
-        <div className="toggle">
-          <span className="toggle__text">
-            <span className="toggle__name">Client fixes debug window</span>
-            <span className="toggle__hint">Show the DLL diagnostic window when the game starts; takes effect on the next launch</span>
-          </span>
-          <button
-            className={`switch${config.client_fixes_debug_window ? " is-on" : ""}`}
-            type="button"
-            role="switch"
-            aria-checked={config.client_fixes_debug_window}
-            aria-label="Client fixes debug window"
-            onClick={() => onConfig({ client_fixes_debug_window: !config.client_fixes_debug_window })}
-          />
-        </div>
+        {/* The staff only (admins, moderators, developers); the launcher opens the window for them only. */}
+        {isStaff(profile) && (
+          <div className="toggle">
+            <span className="toggle__text">
+              <span className="toggle__name">Client fixes debug window</span>
+              <span className="toggle__hint">Show the DLL diagnostic window when the game starts; takes effect on the next launch</span>
+            </span>
+            <button
+              className={`switch${config.client_fixes_debug_window ? " is-on" : ""}`}
+              type="button"
+              role="switch"
+              aria-checked={config.client_fixes_debug_window}
+              aria-label="Client fixes debug window"
+              onClick={() => onConfig({ client_fixes_debug_window: !config.client_fixes_debug_window })}
+            />
+          </div>
+        )}
 
       </div>
 
