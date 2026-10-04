@@ -19,6 +19,7 @@ mod startup_images;
 mod twitch;
 mod gateway;
 mod leaderboard;
+mod smart_app_control;
 pub mod hosts;
 pub mod news;
 
@@ -191,6 +192,17 @@ async fn game_files(state: &AppState) -> Result<integrity::Report> {
 #[tauri::command]
 async fn check_game_files(state: State<'_, AppState>) -> Result<GameFiles> {
     Ok(game_files(&state).await?.into())
+}
+
+/// Windows Security on App & browser control, for the Smart App Control
+/// window (smart_app_control.rs).
+#[tauri::command]
+fn open_windows_security() -> Result<()> {
+    if smart_app_control::open_settings() {
+        Ok(())
+    } else {
+        Err(LauncherError::Message("Windows Security could not be opened. Open it from the Start menu.".into()))
+    }
 }
 
 #[tauri::command]
@@ -764,6 +776,16 @@ async fn launch_game(
         Err(e) => return Err(e),
     }
 
+    // Windows 11's Smart App Control refuses DLLs without a trusted signature,
+    // and ours are not code-signed yet: the game would stop at start with "Bad
+    // Image" (0xc0e90002). Say so instead (smart_app_control.rs); the fixes
+    // deployment is rolled back as for any early failure.
+    if let Some(file) = smart_app_control::blocked(&cfg.install_dir, cfg.client_fixes_enabled) {
+        eprintln!("[smart app control] on, and {} is not signed", file.display());
+        let _ = app.emit("windows:smart-app-control", ());
+        return Err(LauncherError::SmartAppControl);
+    }
+
     // The community's startup pictures (startup_images.rs). A picture that
     // cannot be written is never a reason not to start the game.
     if let Err(e) = startup_images::apply(&cfg.install_dir) {
@@ -1272,6 +1294,7 @@ pub fn run() {
             set_config,
             install_state,
             check_game_files,
+            open_windows_security,
             open_install_dir,
             fetch_news,
             hosts_status,
