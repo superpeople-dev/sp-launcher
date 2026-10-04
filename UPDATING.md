@@ -128,6 +128,31 @@ Both secrets live in the repository's **release** environment, which only
 Without either secret the workflow fails at its first step and says which is
 missing; it never publishes an unsigned build.
 
+### Code signing
+
+Windows 11's Smart App Control and SmartScreen trust files with an
+Authenticode signature from a trusted provider. Ours comes from Azure Artifact
+Signing (account `superpeoplesign`, certificate profile in the repository
+variable `ARTIFACT_SIGNING_PROFILE`). This signature is separate from the
+updater's `.sig` above, which only launchers check.
+
+- **What is signed**: the launcher, its uninstaller and the installer, by
+  Tauri through `bundle.windows.signCommand` → `tools/sign.ps1`, before the
+  updater's `.sig` is made. The game DLLs it bundles are signed by
+  sp-native's build.
+- **When**: only once `ARTIFACT_SIGNING_PROFILE` is set. Until then releases
+  are built as before, without it.
+- **Sign-in**: the release job signs in to Azure with GitHub's OIDC token for
+  the `release` environment, as the app `sp-code-signing`. Its federated
+  credential trusts that environment only, so there is no secret. The other
+  repository variables say where: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+  `ARTIFACT_SIGNING_ENDPOINT`, `ARTIFACT_SIGNING_ACCOUNT`.
+- **Checking it**: Actions → Check code signing → *Run workflow* signs in
+  and, with a profile, signs a copy of the latest installer. On a PC:
+  `Get-AuthenticodeSignature .\SP.Launcher_X.Y.Z_x64-setup.exe` (Status
+  `Valid`).
+- A build made by hand (`tools/publish-update.ps1`) is not code-signed.
+
 ### Launchers up to 0.3.3
 
 They only know the VPS endpoint. After the first automatic release (0.3.4),
