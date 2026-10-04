@@ -25,6 +25,11 @@ pub enum LauncherError {
     /// terms). lib.rs tells the UI, which opens them.
     #[error("Accept the Terms of Service to play.")]
     TermsRequired,
+
+    /// The website or the game backend requires a newer launcher (auth.rs
+    /// VERSION). lib.rs tells the UI, which installs the update.
+    #[error("This launcher is out of date. It is updating now; if it does not, close it and open it again.")]
+    UpdateRequired,
 }
 
 impl Serialize for LauncherError {
