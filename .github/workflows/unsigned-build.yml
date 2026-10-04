@@ -1,12 +1,15 @@
 name: Unsigned Windows build
 
-# Every push to main and every pull request builds and tests the launcher, so a
-# ready unsigned build is always there (Actions -> run -> Artifacts). Signed
-# releases are release.yml's.
+# Every pull request builds and tests the launcher, so a ready unsigned build is
+# there to try (Actions -> run -> Artifacts, kept 3 days). A push to main is NOT
+# built here: release.yml builds, tests and signs that exact commit already, and
+# building it twice on Windows (billed at 2x) was half of this repo's Actions
+# minutes. A pull request that only changes docs is not built. Run this by hand
+# (Actions -> Unsigned Windows build -> Run workflow) for an unsigned build of
+# any branch.
 on:
-  push:
-    branches: [main]
   pull_request:
+    paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
     inputs:
       native_ref:
@@ -166,3 +169,5 @@ jobs:
           name: sp-launcher-unsigned-windows-x64
           path: artifacts/unsigned/
           if-no-files-found: error
+          # 27 MB a run: 90 days (the default) of them was 4 GB of Actions storage.
+          retention-days: 3
