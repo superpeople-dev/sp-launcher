@@ -1,0 +1,53 @@
+name: Check code signing
+
+# Run by hand on main (Actions -> Check code signing -> Run workflow). It signs
+# in to Azure the way the release does: GitHub's OIDC token for the "release"
+# environment, as the app sp-code-signing (no secret; UPDATING.md, "Code
+# signing"). Once ARTIFACT_SIGNING_PROFILE is set it also signs a copy of the
+# latest release's installer with tools/sign.ps1 and checks the signature.
+# Nothing is built or published.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  check:
+    name: Sign-in and a test signature
+    runs-on: windows-2022
+    timeout-minutes: 15
+    environment: release
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+      ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+      ARTIFACT_SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Sign in to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Who signed in
+        shell: pwsh
+        run: |
+          az account show --query "{tenant: tenantId, app: user.name, type: user.type}" -o table
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Sign a copy of the latest installer
+        if: vars.ARTIFACT_SIGNING_PROFILE != ''
+        shell: pwsh
+        run: |
+          Install-Module -Name ArtifactSigning -RequiredVersion 0.1.8 -Force -Repository PSGallery
+          gh release download --repo $env:GITHUB_REPOSITORY --pattern '*_x64-setup.exe' --dir test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $setup = Get-ChildItem test -Filter '*_x64-setup.exe' | Select-Object -First 1
+          ./tools/sign.ps1 $setup.FullName
+          $sig = Get-AuthenticodeSignature -LiteralPath $setup.FullName
+          Write-Host "Signed by $($sig.SignerCertificate.Subject), timestamped: $($null -ne $sig.TimeStamperCertificate)"

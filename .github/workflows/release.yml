@@ -16,6 +16,12 @@ name: Release
 # The signing key and SP_NATIVE_TOKEN (read access to sp-native) are secrets of
 # the "release" environment, which only main can use (UPDATING.md, "Automatic
 # releases").
+#
+# Code signing: once the repository variable ARTIFACT_SIGNING_PROFILE is set,
+# the launcher, its uninstaller and the installer also get an Authenticode
+# signature (Azure Artifact Signing, tools/sign.ps1), so Windows' Smart App
+# Control and SmartScreen trust them. The job signs in to Azure with GitHub's
+# OIDC token for this environment; no secret (UPDATING.md, "Code signing").
 on:
   push:
     branches: [main]
@@ -31,6 +37,7 @@ concurrency:
 
 permissions:
   contents: write
+  id-token: write # Azure sign-in for code signing
 
 jobs:
   release:
@@ -149,13 +156,42 @@ jobs:
           if ($hash -ne $env:SEVENZR_SHA256) { throw "7zr.exe does not match its checksum: $hash" }
           Copy-Item -LiteralPath $exe -Destination src-tauri/resources/7zr.exe
 
+      # Code signing (see the top), only once the certificate profile exists:
+      # Tauri then runs tools/sign.ps1 on each file it signs, before the
+      # updater's .sig is made, so that .sig covers the signed installer.
+      - name: Sign in to Azure
+        if: steps.version.outputs.skip != 'true' && vars.ARTIFACT_SIGNING_PROFILE != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Set up code signing
+        id: codesign
+        if: steps.version.outputs.skip != 'true' && vars.ARTIFACT_SIGNING_PROFILE != ''
+        shell: pwsh
+        run: |
+          Install-Module -Name ArtifactSigning -RequiredVersion 0.1.8 -Force -Repository PSGallery
+          $script = (Resolve-Path tools/sign.ps1).Path
+          $config = Join-Path $env:RUNNER_TEMP 'tauri.signing.json'
+          @{ bundle = @{ windows = @{ signCommand = @{
+            cmd = 'pwsh'
+            args = @('-NoProfile', '-NonInteractive', '-File', $script, '%1')
+          } } } } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $config -Encoding utf8
+          "args=--config $config" >> $env:GITHUB_OUTPUT
+
       - name: Build and sign the installer
         if: steps.version.outputs.skip != 'true'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           # The current key has none; set anyway so Tauri never asks for one.
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: bun run tauri build
+          # For tools/sign.ps1, when code signing is on.
+          ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          ARTIFACT_SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+        run: bun run tauri build ${{ steps.codesign.outputs.args }}
 
       - name: Prepare the release files
         if: steps.version.outputs.skip != 'true'
@@ -164,11 +200,17 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           PREVIOUS: ${{ steps.version.outputs.previous }}
           NATIVE: ${{ steps.native.outputs.build }}
+          CODE_SIGNING: ${{ steps.codesign.outcome == 'success' }}
         run: |
           $setup = Get-ChildItem src-tauri/target/release/bundle/nsis -Filter "*_${env:VERSION}_x64-setup.exe" | Select-Object -First 1
           if (-not $setup) { throw "no installer for $env:VERSION" }
           if (-not (Test-Path "$($setup.FullName).sig")) {
             throw 'The installer was built but not signed, so no launcher would accept it. Check TAURI_SIGNING_PRIVATE_KEY.'
+          }
+          if ($env:CODE_SIGNING -eq 'true') {
+            $sig = Get-AuthenticodeSignature -LiteralPath $setup.FullName
+            if ($sig.Status -ne 'Valid') { throw "The installer has no valid Authenticode signature: $($sig.Status) $($sig.StatusMessage)" }
+            Write-Host "Installer signed by $($sig.SignerCertificate.Subject)"
           }
           # The name GitHub gives it (no space), so its address is known.
           $name = "SP.Launcher_${env:VERSION}_x64-setup.exe"
