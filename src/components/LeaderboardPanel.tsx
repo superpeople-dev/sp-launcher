@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Icon } from "./community/Icon";
 
 /** Mirrors `leaderboard::Row`. */
 interface Row {
@@ -17,6 +18,7 @@ interface Board {
   lists: Record<string, Row[]>;
 }
 
+// Each shows the icon of the same name (community/Icon.tsx).
 const MODES = [
   { id: "solo", label: "Solo" },
   { id: "duo", label: "Duo" },
@@ -30,8 +32,55 @@ const VIEWS = [
 type Mode = (typeof MODES)[number]["id"];
 type View = (typeof VIEWS)[number]["id"];
 
-// The backend refreshes the lists every minute; so does the page while it is open.
-const REFRESH_MS = 60_000;
+// The last board read, kept on this PC, shows at once each time the page opens (it used to start empty
+// and wait for the backend every time). It is read again behind it once it is 5 minutes old, while the
+// page is open, or on Refresh; what comes back is shown and kept in its place. The backend itself
+// refreshes the lists every minute.
+const REFRESH_MS = 5 * 60_000;
+// After a read that failed, the next one is tried a minute later.
+const RETRY_MS = 60_000;
+const KEY = "sp.leaderboard";
+
+interface Kept {
+  board: Board;
+  at: number;
+}
+let kept: Kept | null = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(KEY) ?? "null");
+    return saved && typeof saved.at === "number" && saved.board && typeof saved.board.lists === "object" ? saved : null;
+  } catch {
+    return null;
+  }
+})();
+function keep(board: Board | null) {
+  kept = board ? { board, at: Date.now() } : null;
+  try {
+    if (kept) localStorage.setItem(KEY, JSON.stringify(kept));
+    else localStorage.removeItem(KEY);
+  } catch {
+    /* no storage: only this run keeps it */
+  }
+}
+
+// One read at a time, whoever asks (the timer, Refresh, the page opening again).
+let reading: Promise<Board | null> | null = null;
+let triedAt = 0;
+function read(): Promise<Board | null> {
+  if (!reading) {
+    triedAt = Date.now();
+    reading = invoke<Board | null>("leaderboard").finally(() => (reading = null));
+  }
+  return reading;
+}
+
+function ago(ms: number): string {
+  const min = Math.floor(ms / 60_000);
+  if (min < 1) return "Updated just now";
+  if (min < 60) return `Updated ${min} min ago`;
+  const h = Math.floor(min / 60);
+  return h < 48 ? `Updated ${h} h ago` : `Updated ${Math.floor(h / 24)} days ago`;
+}
 
 // The game's tier ids (sp-backend lib/tables.js): 420100001 Super Soldier .. 420100004 Master, then
 // Diamond I (420100005) down to Iron V (420100034). The colours are the website's.
@@ -81,26 +130,44 @@ const countryName = (code: string) => {
  * The Leaderboard page: each mode's top 100 of the season (leaderboard.rs), the mode and view picked
  * above the list, and a search by name that stays when the list changes. Opens on Solo TPP and stays
  * there until the player picks another list (it used to jump to the busiest list once loaded). Players
- * found keep their rank.
+ * found keep their rank. The board kept from last time shows at once; Refresh, top right, reads it again.
  */
 export function LeaderboardPanel() {
-  const [board, setBoard] = useState<Board | null | undefined>(undefined);
+  const [board, setBoard] = useState<Board | null | undefined>(kept?.board);
+  const [at, setAt] = useState(kept?.at ?? 0);
+  const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState("");
+  const [now, setNow] = useState(() => Date.now());
   const [key, setKey] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
   const load = useCallback(async () => {
+    setBusy(true);
     try {
-      setBoard(await invoke<Board | null>("leaderboard"));
+      const got = await read();
+      // None: the backend has no public leaderboard (switched off), so the kept one goes too.
+      keep(got);
+      setBoard(got);
+      setAt(kept?.at ?? 0);
       setFailed("");
     } catch (e) {
       setFailed(String(e));
+    } finally {
+      setBusy(false);
+      setNow(Date.now());
     }
   }, []);
 
   useEffect(() => {
-    void load();
-    const timer = window.setInterval(() => void load(), REFRESH_MS);
+    const tick = () => {
+      const t = Date.now();
+      setNow(t);
+      if ((!kept || t - kept.at >= REFRESH_MS) && t - triedAt >= RETRY_MS) void load();
+    };
+    // A read already under way when the page opens again (left and back quickly) is waited for.
+    if (reading) void load();
+    else tick();
+    const timer = window.setInterval(tick, 15_000);
     return () => window.clearInterval(timer);
   }, [load]);
 
@@ -126,12 +193,24 @@ export function LeaderboardPanel() {
       <header className="done__head leaders__head">
         <h2 className="done__title">Leaderboard</h2>
         <p className="done__lead">The season's top 100 of each mode.</p>
+        <div className="leaders__tools">
+          {board && (
+            <span className={`leaders__when${failed ? " is-failed" : ""}`} title={failed || undefined}>
+              {failed ? "Couldn't refresh" : ago(now - at)}
+            </span>
+          )}
+          <button type="button" className={`btn leaders__refresh${busy ? " is-busy" : ""}`} aria-busy={busy} onClick={() => void load()}>
+            <Icon name="refresh" />
+            Refresh
+          </button>
+        </div>
       </header>
 
       <div className="leaders__bar">
         <div className="seg" role="group" aria-label="Mode">
           {MODES.map((m) => (
             <button key={m.id} type="button" className={`seg__btn${m.id === mode ? " is-on" : ""}`} aria-pressed={m.id === mode} onClick={() => setKey(`${m.id}_${view}`)}>
+              <Icon name={m.id} />
               {m.label}
             </button>
           ))}
@@ -139,6 +218,7 @@ export function LeaderboardPanel() {
         <div className="seg" role="group" aria-label="View">
           {VIEWS.map((v) => (
             <button key={v.id} type="button" className={`seg__btn${v.id === view ? " is-on" : ""}`} aria-pressed={v.id === view} onClick={() => setKey(`${mode}_${v.id}`)}>
+              <Icon name={v.id} />
               {v.label}
             </button>
           ))}

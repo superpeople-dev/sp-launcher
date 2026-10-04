@@ -339,16 +339,8 @@
 .vote.is-up .vote__score{ color: var(--signal-hi); }
 .vote.is-down .vote__score{ color: var(--down); }
 
-/* ---- scroll areas ---- */
+/* ---- scroll areas (their bar: styles.css, for every one) ---- */
 .ideas__list, .detail__scroll, .lane__list, .timeline, .twitch__about, .twitch__list{ overflow-y: auto; overscroll-behavior: contain; }
-.ideas__list::-webkit-scrollbar, .detail__scroll::-webkit-scrollbar,
-.lane__list::-webkit-scrollbar, .timeline::-webkit-scrollbar,
-.twitch__about::-webkit-scrollbar, .twitch__list::-webkit-scrollbar{ width: 8px; }
-.ideas__list::-webkit-scrollbar-thumb, .detail__scroll::-webkit-scrollbar-thumb,
-.lane__list::-webkit-scrollbar-thumb, .timeline::-webkit-scrollbar-thumb,
-.twitch__about::-webkit-scrollbar-thumb, .twitch__list::-webkit-scrollbar-thumb{
-  background: rgba(255,255,255,0.14); border: 2px solid transparent; background-clip: content-box; border-radius: 8px;
-}
 
 .row--ghost, .task--ghost, .entry--ghost, .chan--ghost, .leader--ghost, .thread__loading span, .skel{
   border: 1px solid var(--line-soft);
@@ -644,7 +636,15 @@
 
 /* the Leaderboard page (LeaderboardPanel.tsx); tier colours as on the website */
 .leaders{ grid-template-rows: auto auto minmax(0, 1fr); gap: 10px; min-height: 0; }
+/* Top right: how old the board is, and Refresh, whose arrow turns while it reads. */
+.leaders__tools{ margin-left:auto; display:flex; align-items:center; gap: 12px; flex: none; }
+.leaders__when{ font-family: var(--read); font-size: 12px; color: var(--muted); white-space:nowrap; }
+.leaders__when.is-failed{ color: var(--signal-hi); }
+.leaders__refresh{ display:inline-flex; align-items:center; gap: 7px; padding: 6px 12px; }
+.leaders__refresh .icon{ width: 13px; height: 13px; }
+.leaders__refresh.is-busy .icon{ animation: spin .8s linear infinite; }
 .leaders__bar{ display:flex; align-items:center; gap: 8px; }
+.leaders__bar .seg__btn .icon{ width: 14px; height: 14px; }
 .leaders__search{ position: relative; display:flex; align-items:center; margin-left: auto; width: 220px; }
 /* z-index: the input's backdrop-filter paints it above an absolutely placed sibling, hiding the icon */
 .leaders__search svg{ position:absolute; left: 9px; z-index: 1; width: 13px; height: 13px; color: var(--muted); pointer-events:none; }
