@@ -770,8 +770,11 @@ async fn launch_game(
         eprintln!("[startup images] {e}");
     }
 
-    // Explicitly override inherited settings even for disabled launches.
-    env.extend(client_fixes_startup::environment(cfg.client_fixes_enabled, cfg.client_fixes_debug_window));
+    // Explicitly override inherited settings even for disabled launches. The debug
+    // window is for the staff only (admins, moderators, developers): a player who
+    // turned it on before it was hidden from them does not get it.
+    let debug_window = cfg.client_fixes_debug_window && cfg.profile.as_ref().is_some_and(auth::Profile::is_staff);
+    env.extend(client_fixes_startup::environment(cfg.client_fixes_enabled, debug_window));
     let fixes_startup = if cfg.client_fixes_enabled {
         Some(client_fixes_startup::Startup::new()?)
     } else { None };

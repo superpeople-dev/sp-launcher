@@ -80,7 +80,15 @@ export interface Profile {
   /** A website admin: the admin tools show. The website checks again on every call. */
   admin: boolean;
   permissions: Permission[];
+  /** What they are on the team (sp-website lib/staff.ts); empty for a player, and from websites
+   *  before the staff kinds. Only the staff see the client fixes debug window setting. */
+  staff?: StaffKind[];
 }
+
+export type StaffKind = "admin" | "moderator" | "developer";
+
+/** An admin, moderator or developer (auth.rs `Profile::is_staff`). */
+export const isStaff = (profile: Profile | null | undefined) => Boolean(profile && (profile.admin || profile.staff?.length));
 
 /** What a website admin may do (sp-website lib/board.ts). */
 export type Permission = "review" | "manage" | "comments" | "bans";
