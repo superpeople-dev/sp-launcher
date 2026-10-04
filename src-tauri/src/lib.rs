@@ -1,6 +1,7 @@
 mod auth;
 mod community;
 mod config;
+mod crash_reporter;
 mod client_fixes;
 mod client_fixes_deployment;
 mod client_fixes_startup;
@@ -790,6 +791,12 @@ async fn launch_game(
     // cannot be written is never a reason not to start the game.
     if let Err(e) = startup_images::apply(&cfg.install_dir) {
         eprintln!("[startup images] {e}");
+    }
+    // The crash window's Send goes to the backend and the staff's #crash-logs
+    // (crash_reporter.rs), not the original developer's BugSplat. Never a
+    // reason not to start the game either.
+    if let Err(e) = crash_reporter::apply() {
+        eprintln!("[crash reporter] {e}");
     }
 
     // Explicitly override inherited settings even for disabled launches. The debug
