@@ -12,6 +12,14 @@ so the game could not start. Your antivirus most likely removed it: restore it f
 then launch again.".into())
 }
 
+/// The game closed before the fixes answered, its proxy still in place. Without the fixes the game
+/// stops on our pak's signature a few seconds in ("Pak master signature table check failed"), and
+/// what keeps them from loading with the files there is nearly always an antivirus blocking
+/// XAPOFX1_5.dll or SPClientFixes.dll.
+pub fn exited_early(status: std::process::ExitStatus) -> LauncherError {
+    LauncherError::Message(format!("The game closed before the client fixes started ({status}). If this keeps happening, your antivirus is most likely keeping XAPOFX1_5.dll or SPClientFixes.dll in the game folder from loading: add the SUPER PEOPLE folder as an exclusion in your antivirus (and restore anything it quarantined), then launch again."))
+}
+
 pub fn environment(enabled: bool, debug_window: bool) -> Vec<(String, String)> {
     vec![
         ("SP_CLIENT_FIXES_ENABLED".into(), if enabled { "1" } else { "0" }.into()),
@@ -96,7 +104,7 @@ mod windows {
             loop {
                 if let Some(status) = child.try_wait()? {
                     if !proxy_present() { return Err(proxy_removed()); }
-                    return Err(LauncherError::Message(format!("Client fixes: game exited before startup completed ({status})")));
+                    return Err(exited_early(status));
                 }
                 if proxy_present() {
                     missing_since = None;
@@ -148,7 +156,8 @@ mod windows {
             let mut process = std::process::Command::new("cmd.exe").args(["/c", "exit 0"])
                 .creation_flags(0x08000000).spawn().unwrap();
             process.wait().unwrap();
-            assert!(startup.wait_for(&mut process, Duration::from_secs(60), &|| true).is_err());
+            let error = startup.wait_for(&mut process, Duration::from_secs(60), &|| true).unwrap_err().to_string();
+            assert!(error.contains("closed before the client fixes started") && error.contains("antivirus"), "{error}");
         }
         #[test]
         fn proxy_taken_away_stops_the_wait_with_the_antivirus_message() {
