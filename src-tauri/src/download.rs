@@ -107,6 +107,11 @@ use crate::integrity;
 const LIST_PATH: &str = "/api/launcher/game";
 /// A download link for one file, for the signed-in player (…/game/link).
 const LINK_PATH: &str = "/api/launcher/game/link";
+/// Waits before asking for the list again: three tries in all. A connection
+/// that drops while the list arrives reads as "error decoding response body"
+/// (05.10.2026, a player whose download never started), and without the list
+/// nothing can be downloaded.
+const LIST_WAITS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(6)];
 /// Files downloaded at the same time. The bucket gives about 9 MB/s per
 /// connection; 8 filled a 50 MB/s line in a test, 12 leaves room for faster ones.
 const PARALLEL: usize = 12;
@@ -704,7 +709,7 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
     // ---- checking ------------------------------------------------------
     ctx.emit();
     let client = http_client()?;
-    let mut list = fetch_list(&client)
+    let mut list = fetch_list()
         .await
         .map_err(|e| Stop::Failed(format!("Could not get the list of the game's files from superpeople.dev: {e}")))?;
     // The startup pictures are the launcher's own (startup_images.rs, written
@@ -991,6 +996,19 @@ fn http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .user_agent(concat!("SP-Launcher/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(20))
+        // The game's files come in `Range` parts and are checked byte for
+        // byte against their size and SHA-256: never as a compressed answer.
+        .no_gzip()
+        .build()?)
+}
+
+/// The list's own client: it asks for a compressed answer, 74 KB -> 24 KB
+/// (05.10.2026), so less of it can be lost on the way.
+fn list_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .user_agent(concat!("SP-Launcher/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(20))
+        .gzip(true)
         .build()?)
 }
 
@@ -1002,16 +1020,60 @@ fn official(list: &GameList) -> Vec<integrity::Official> {
 /// The game's files, as Play checks them (integrity.rs): the website's list,
 /// without the launcher's own startup pictures.
 pub async fn official_files() -> Result<Vec<integrity::Official>> {
-    let mut list = fetch_list(&http_client()?).await?;
+    let mut list = fetch_list().await?;
     list.files.retain(|f| !crate::startup_images::is_ours(&f.path));
     Ok(official(&list))
 }
 
-async fn fetch_list(client: &reqwest::Client) -> Result<GameList> {
-    let url = format!("{}{LIST_PATH}", crate::auth::site_url());
-    let list: GameList = client.get(url).timeout(Duration::from_secs(30)).send().await?.error_for_status()?.json().await?;
-    check_list(&list).map_err(|why| LauncherError::Message(format!("the list is not valid ({why})")))?;
-    Ok(list)
+async fn fetch_list() -> Result<GameList> {
+    fetch_list_from(&format!("{}{LIST_PATH}", crate::auth::site_url()), &LIST_WAITS).await
+}
+
+/// The list from `url`, asked again after each wait in `waits` when the
+/// network fails it. An answer from the site that refuses it (4xx) is final,
+/// and so is a list that arrives whole but is not valid.
+async fn fetch_list_from(url: &str, waits: &[Duration]) -> Result<GameList> {
+    let client = list_client()?;
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        let got = async {
+            client.get(url).timeout(Duration::from_secs(30)).send().await?.error_for_status()?.json::<GameList>().await
+        }
+        .await;
+        match got {
+            Ok(list) => {
+                check_list(&list).map_err(|why| LauncherError::Message(format!("the list is not valid ({why})")))?;
+                return Ok(list);
+            }
+            Err(e) => {
+                let refused = e.status().is_some_and(|s| s.is_client_error());
+                if refused || tries > waits.len() {
+                    let after = if tries > 1 { format!(" ({tries} tries)") } else { String::new() };
+                    return Err(LauncherError::Message(format!("network: {}{after}", with_causes(&e))));
+                }
+                tokio::time::sleep(waits[tries - 1]).await;
+            }
+        }
+    }
+}
+
+/// A network error with what caused it: reqwest's own text is only the
+/// first line ("error decoding response body"), its causes say why ("connection
+/// reset", "EOF while parsing ..."). Each cause once.
+fn with_causes(e: &reqwest::Error) -> String {
+    use std::error::Error as _;
+    let mut text = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        let part = c.to_string();
+        if !part.is_empty() && !text.contains(&part) {
+            text.push_str(": ");
+            text.push_str(&part);
+        }
+        cause = c.source();
+    }
+    text
 }
 
 /// The list decides where files are written and what is downloaded, so it is
@@ -2431,6 +2493,83 @@ mod tests {
         assert_eq!(parts_on_disk(tmp.path()), None);
         std::fs::write(tmp.path().join(format!("{}.part", "a".repeat(64))), b"1234").unwrap();
         assert_eq!(parts_on_disk(tmp.path()), Some(4));
+    }
+
+    // ---- the list (fetch_list_from) ---------------------------------------
+
+    /// A valid list, as the site sends it.
+    fn list_json() -> Vec<u8> {
+        serde_json::json!({ "files": [{ "path": crate::game::GAME_EXE, "size": 3, "sha256": sha(b"abc") }] })
+            .to_string()
+            .into_bytes()
+    }
+
+    /// Answers each request with `answers[n]` (the last one again after that):
+    /// `Some(status, body, cut)` sends the head and the body, only its first
+    /// half when `cut`; `None` closes the connection at once. Keeps every request.
+    async fn serve_list(answers: Vec<Option<(u16, Vec<u8>, bool)>>) -> (String, Arc<Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let kept = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let index = {
+                    let mut seen = kept.lock().unwrap();
+                    seen.push(String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase());
+                    seen.len() - 1
+                };
+                let Some((status, body, cut)) = answers[index.min(answers.len() - 1)].clone() else { continue };
+                let head = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(if cut { &body[..body.len() / 2] } else { &body }).await;
+            }
+        });
+        (format!("http://{addr}/api/launcher/game"), seen)
+    }
+
+    const NO_WAIT: [Duration; 2] = [Duration::from_millis(1), Duration::from_millis(1)];
+
+    #[tokio::test]
+    async fn the_list_is_asked_again_when_its_answer_is_cut_off() {
+        let (url, seen) = serve_list(vec![Some((200, list_json(), true)), None, Some((200, list_json(), false))]).await;
+        let list = fetch_list_from(&url, &NO_WAIT).await.expect("the third try brings the list");
+        assert_eq!(list.files.len(), 1);
+        assert_eq!(seen.lock().unwrap().len(), 3, "a cut-off answer and a dropped connection were asked again");
+    }
+
+    #[tokio::test]
+    async fn a_list_that_never_arrives_says_why_and_how_often() {
+        let (url, seen) = serve_list(vec![Some((200, list_json(), true))]).await;
+        let e = fetch_list_from(&url, &NO_WAIT).await.expect_err("never whole").to_string();
+        assert_eq!(seen.lock().unwrap().len(), 3, "three tries in all");
+        assert!(e.starts_with("network: error decoding response body: "), "the cause follows: {e}");
+        assert!(e.ends_with(" (3 tries)"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_list_is_not_asked_again() {
+        let (url, seen) = serve_list(vec![Some((404, b"{}".to_vec(), false))]).await;
+        let e = fetch_list_from(&url, &NO_WAIT).await.expect_err("404").to_string();
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert!(e.contains("404") && !e.contains("tries"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn the_list_is_asked_compressed_and_the_game_files_never_are() {
+        let (url, seen) = serve_list(vec![Some((200, list_json(), false))]).await;
+        fetch_list_from(&url, &NO_WAIT).await.expect("the list");
+        let _ = http_client().unwrap().get(&url).send().await;
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].contains("accept-encoding: gzip"), "the list: {}", seen[0]);
+        assert!(!seen[1].contains("gzip"), "a game file: {}", seen[1]);
     }
 
     // ---- a real download from a small local server ----------------------
