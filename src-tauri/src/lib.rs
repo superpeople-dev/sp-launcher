@@ -18,6 +18,7 @@ mod reports;
 mod shim;
 mod startup_images;
 mod twitch;
+mod upscalers;
 mod gateway;
 mod leaderboard;
 mod smart_app_control;
@@ -169,11 +170,13 @@ struct GameFiles {
     changed: usize,
     unchecked: usize,
     extra: Vec<String>,
+    /// DLSS / XeSS libraries swapped for a build the launcher does not recognise (upscalers.rs).
+    replaced: usize,
 }
 
 impl From<integrity::Report> for GameFiles {
     fn from(r: integrity::Report) -> Self {
-        GameFiles { ok: r.ok(), message: r.message(), missing: r.missing.len(), changed: r.changed.len(), unchecked: r.unchecked, extra: r.extra }
+        GameFiles { ok: r.ok(), message: r.message(), missing: r.missing.len(), changed: r.changed.len(), unchecked: r.unchecked, replaced: r.replaced.len(), extra: r.extra }
     }
 }
 

@@ -32,6 +32,7 @@ interface Props {
 function filesNote(files: GameFiles): string {
   const damaged = files.missing + files.changed;
   if (damaged > 0) return damaged === 1 ? "1 file does not match" : `${damaged} files do not match`;
+  if (files.replaced > 0) return files.replaced === 1 ? "1 DLSS/XeSS file not recognised" : `${files.replaced} DLSS/XeSS files not recognised`;
   if (files.extra.length > 0) return files.extra.length === 1 ? "1 extra file found" : `${files.extra.length} extra files found`;
   return "Check the files once";
 }
