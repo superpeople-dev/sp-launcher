@@ -863,8 +863,12 @@ async fn launch_game(
         return Err(error);
     }
     if let Some(startup) = fixes_startup {
+        // Antivirus that takes the proxy away right after shim::apply wrote it leaves the game
+        // with Windows' own XAPOFX1_5.dll: no Client fixes, and an end on the PAK's signature
+        // (client_fixes_startup::proxy_removed).
+        let proxy = shim::target_path(std::path::Path::new(&cfg.install_dir));
         let (returned_child, result) = tauri::async_runtime::spawn_blocking(move || {
-            let result = startup.wait(&mut child);
+            let result = startup.wait(&mut child, &|| proxy.is_file());
             (child, result)
         }).await.map_err(|e| LauncherError::Message(format!("Client fixes startup task failed: {e}")))?;
         child = returned_child;
