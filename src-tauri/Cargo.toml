@@ -33,6 +33,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 # Download tab (download.rs): streaming bodies, several files at once; SHA-256
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 sha2 = "0.10.9"
+md-5 = "0.10"
 
 # loopback session gateway
 hyper = { version = "1", features = ["server", "http1"] }
@@ -54,7 +55,7 @@ base64 = "0.22"
 # Win32_System_IO and Win32_System_Ioctl: the serial number of the disk Windows
 # is on, for the PC's one-way code (pcid.rs).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Security_WinTrust", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Power", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_Security_Cryptography_Catalog", "Win32_Security_Cryptography_Sip", "Win32_Security_WinTrust", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Power", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 tempfile = "3"

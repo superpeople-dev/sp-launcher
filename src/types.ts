@@ -48,6 +48,8 @@ export interface GameFiles {
   unchecked: number;
   /** Paks and DLLs that are not part of the game. */
   extra: string[];
+  /** DLSS / XeSS libraries swapped for a build the launcher does not recognise. */
+  replaced: number;
 }
 
 /** Mirrors `auth::Terms`: what Play needs accepted, from the website. */

@@ -89,6 +89,15 @@ Rust backend. Windows only.
   `.sp-removed` in the game folder (`src-tauri/src/integrity.rs`). A game the
   launcher never hashed (installs from before this check) needs one Verify
   files.
+- **Your own DLSS / XeSS upgrades.** A DLSS, DLSS Frame Generation or XeSS
+  library swapped with a tool such as DLSS Swapper is kept by Play and Verify
+  files when the launcher recognises it: only at those libraries' paths, and
+  only a build of DLSS Swapper's catalogue (size and MD5) with a valid NVIDIA or
+  Intel signature. Anything else there stops Play with a message to put back a
+  recognised version with that tool, or Verify files to restore the game's own
+  (`src-tauri/src/upscalers.rs`). Recognised means known, not tested with this
+  game. The list is `src-tauri/resources/upscalers.json`;
+  `node tools/update-upscalers.mjs` refreshes it from the catalogue.
 - **Engine.ini patch.** Before each launch, `n.VerifyPeer=False` and related
   settings are applied (`src-tauri/src/engine_ini.rs`).
 - **Starts the real game exe.** The launcher starts

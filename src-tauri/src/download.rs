@@ -721,6 +721,14 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
     // The game already in this folder (or a folder or two below it) is
     // completed where it is; otherwise it goes straight into the folder.
     let root = find_install_root(&ctx.dir).unwrap_or_else(|| ctx.dir.clone());
+    // A DLSS / XeSS library the player swapped for a build the launcher recognises stays as their
+    // tool put it (upscalers.rs): not fetched again, not checked as a game file.
+    let kept = kept_swaps(&root, &list.files);
+    list.files.retain(|f| !kept.iter().any(|(path, _)| *path == f.path));
+    let kept_note = match kept.len() {
+        0 => String::new(),
+        _ => format!(" Kept your {}.", kept.iter().map(|(_, what)| what.as_str()).collect::<Vec<_>>().join(", ")),
+    };
     let mut jobs = missing(&root, &list.files);
     // Verify files: paks and DLLs that are not part of the game go out of its
     // way first (integrity.rs), so Play accepts the folder afterwards.
@@ -750,7 +758,7 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
             (ctx.tell)(Event::Report(serde_json::json!({ "action": "verify.ok", "files": list.files.len(), "moved": moved.len() })));
         }
         let message = if verify {
-            format!("All {} files are fine: nothing to download.{moved_note}", list.files.len())
+            format!("All {} files are fine: nothing to download.{moved_note}{kept_note}", list.files.len())
         } else {
             "The game is already in this folder: nothing to download.".to_string()
         };
@@ -1119,6 +1127,26 @@ fn safe_path(path: &str) -> bool {
                 && !part.ends_with(' ')
                 && !part.chars().any(|c| c.is_control() || matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
         })
+}
+
+/// The DLSS / XeSS libraries in the folder that are the player's recognised swap, not the game's
+/// own: (path, "DLSS 310.9.1.0 (nvngx_dlss.dll)"). One of the game's size is left to the usual
+/// check, which reads every file anyway.
+fn kept_swaps(root: &Path, files: &[GameFile]) -> Vec<(String, String)> {
+    files
+        .iter()
+        .filter_map(|f| {
+            let library = crate::upscalers::slot(&f.path)?;
+            let path = target_path(root, f);
+            let size = std::fs::metadata(&path).ok()?.len();
+            if size == f.size {
+                return None;
+            }
+            let version = crate::upscalers::recognise(&path, library)?;
+            let file = f.path.rsplit('/').next().unwrap_or(&f.path);
+            Some((f.path.clone(), format!("{} {version} ({file})", library.name())))
+        })
+        .collect()
 }
 
 /// The files of the list the folder does not have: missing, or of another
@@ -2393,6 +2421,22 @@ impl Drop for KeepAwake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verify files leaves a recognised DLSS / XeSS swap alone and repairs anything else there.
+    #[test]
+    fn verify_keeps_only_recognised_upscaler_swaps() {
+        let root = tempfile::tempdir().unwrap();
+        let xess = "Engine/Plugins/Runtime/Intel/XeSS/Binaries/ThirdParty/Win64/libxess.dll";
+        let file = target_path(root.path(), &GameFile { path: xess.into(), size: 0, sha256: String::new() });
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let list = vec![GameFile { path: xess.into(), size: 15, sha256: "e".repeat(64) }];
+        std::fs::write(&file, b"not a xess build, longer").unwrap();
+        assert!(kept_swaps(root.path(), &list).is_empty());
+        let Some(game_dir) = std::env::var_os("SP_TEST_GAME_DIR") else { return };
+        let real = xess.split('/').fold(std::path::PathBuf::from(game_dir), |d, part| d.join(part));
+        std::fs::copy(real, &file).unwrap();
+        assert_eq!(kept_swaps(root.path(), &list), vec![(xess.to_string(), "XeSS 1.0.1.12 (libxess.dll)".to_string())]);
+    }
 
     fn sha(bytes: &[u8]) -> String {
         hex(&Sha256::digest(bytes))
