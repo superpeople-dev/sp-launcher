@@ -24,6 +24,11 @@
 //!
 //! The startup pictures (startup_images.rs) are the launcher's own and are
 //! left out of the list, as for the download.
+//!
+//! The DLSS, Frame Generation and XeSS libraries (upscalers.rs) may also be a
+//! build the player swapped in with their own tool: one the launcher
+//! recognises (catalogue hash and vendor signature) is accepted and remembered
+//! here, one it does not stops Play with a message of its own.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -31,6 +36,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
+use crate::upscalers;
 
 const RECORD_FILE: &str = "game-files.v1.json";
 /// Where Verify files moves the extra files to, in the game folder.
@@ -64,6 +70,8 @@ struct Record {
     /// The game folder these files are in.
     root: String,
     files: Vec<Checked>,
+    /// Upscaler swaps recognised as they are now (upscalers.rs), so Play does not read them again.
+    accepted: Vec<Checked>,
 }
 
 /// What Play found, for the UI.
@@ -78,11 +86,13 @@ pub struct Report {
     pub unchecked: usize,
     /// Paks and DLLs that are not part of the game.
     pub extra: Vec<String>,
+    /// DLSS / XeSS libraries swapped for a build the launcher does not recognise.
+    pub replaced: Vec<String>,
 }
 
 impl Report {
     pub fn ok(&self) -> bool {
-        self.missing.is_empty() && self.changed.is_empty() && self.unchecked == 0 && self.extra.is_empty()
+        self.missing.is_empty() && self.changed.is_empty() && self.unchecked == 0 && self.extra.is_empty() && self.replaced.is_empty()
     }
 
     /// What the player reads when Play is refused.
@@ -100,6 +110,13 @@ impl Report {
                 1 => format!("1 file in the game folder is not part of the game ({})", self.extra[0]),
                 n => format!("{n} files in the game folder are not part of the game (mods or other paks)"),
             });
+        }
+        if !self.replaced.is_empty() {
+            let swaps = upscalers::unrecognised_message(&self.replaced);
+            if parts.is_empty() {
+                return format!("The game cannot start: {swaps}.");
+            }
+            parts.push(swaps);
         }
         if parts.is_empty() && self.unchecked > 0 {
             return "The game's files have not been checked yet. Press Verify files once (it reads the whole game, a few minutes), then Play.".into();
@@ -146,7 +163,7 @@ pub fn checked(root: &Path, path: &str, sha256: &str) -> Option<Checked> {
 pub fn remember(config_dir: &Path, root: &Path, files: impl IntoIterator<Item = Checked>) -> Result<()> {
     let mut record = load(config_dir);
     if record.root != key(root) {
-        record = Record { root: key(root), files: Vec::new() };
+        record = Record { root: key(root), ..Record::default() };
     }
     let mut by_path: HashMap<String, Checked> = record.files.into_iter().map(|f| (f.path.to_lowercase(), f)).collect();
     for f in files {
@@ -154,7 +171,7 @@ pub fn remember(config_dir: &Path, root: &Path, files: impl IntoIterator<Item = 
     }
     let mut files: Vec<Checked> = by_path.into_values().collect();
     files.sort_by(|a, b| a.path.cmp(&b.path));
-    save(config_dir, &Record { root: key(root), files })
+    save(config_dir, &Record { root: key(root), files, accepted: record.accepted })
 }
 
 /// The launcher's own files in the folders that are checked for extras.
@@ -202,13 +219,38 @@ pub fn extras(root: &Path, official: &[Official]) -> Vec<String> {
 /// Compare the game folder with the list and with what the launcher checked.
 pub fn check(config_dir: &Path, root: &Path, official: &[Official]) -> Report {
     let record = load(config_dir);
-    let known: HashMap<String, &Checked> = if record.root == key(root) {
+    let same_root = record.root == key(root);
+    let known: HashMap<String, &Checked> = if same_root {
         record.files.iter().map(|f| (f.path.to_lowercase(), f)).collect()
     } else {
         HashMap::new()
     };
     let mut report = Report { extra: extras(root, official), ..Report::default() };
+    let mut accepted: Vec<Checked> = Vec::new();
     for f in official {
+        // A DLSS / XeSS library that is not the game's own as last checked: the player's swap
+        // when the launcher recognises it, otherwise refused when its size is not the game's.
+        if let Some(library) = upscalers::slot(&f.path) {
+            if let Some((size, modified)) = stamp(&target(root, &f.path)) {
+                let own = size == f.size
+                    && known.get(&f.path.to_lowercase()).is_some_and(|c| c.sha256 == f.sha256 && (c.size, c.modified) == (size, modified));
+                if !own {
+                    let earlier = record.accepted.iter().find(|a| same_root && a.path.eq_ignore_ascii_case(&f.path) && (a.size, a.modified) == (size, modified));
+                    if let Some(a) = earlier {
+                        accepted.push(a.clone());
+                        continue;
+                    }
+                    if let Some(version) = upscalers::recognise(&target(root, &f.path), library) {
+                        accepted.push(Checked { path: f.path.clone(), size, modified, sha256: format!("swap: {} {version}", library.name()) });
+                        continue;
+                    }
+                    if size != f.size {
+                        report.replaced.push(f.path.clone());
+                        continue;
+                    }
+                }
+            }
+        }
         match stamp(&target(root, &f.path)) {
             None => report.missing.push(f.path.clone()),
             Some((size, _)) if size != f.size => report.missing.push(f.path.clone()),
@@ -220,6 +262,13 @@ pub fn check(config_dir: &Path, root: &Path, official: &[Official]) -> Report {
                 }
                 _ => report.unchecked += 1,
             },
+        }
+    }
+    if same_root && accepted != record.accepted {
+        let mut record = record;
+        record.accepted = accepted;
+        if let Err(e) = save(config_dir, &record) {
+            eprintln!("[integrity] {e}");
         }
     }
     report
@@ -338,6 +387,63 @@ mod tests {
             ]
         );
         assert!(report.message().contains("4 files in the game folder are not part of the game"));
+    }
+
+    const XESS: &str = "Engine/Plugins/Runtime/Intel/XeSS/Binaries/ThirdParty/Win64/libxess.dll";
+
+    fn with_xess(root: &Path, official: &mut Vec<Official>, body: &[u8]) {
+        let file = target(root, XESS);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, body).unwrap();
+        official.push(Official { path: XESS.into(), size: body.len() as u64, sha256: "e".repeat(64) });
+    }
+
+    #[test]
+    fn an_upscaler_swapped_for_an_unknown_build_stops_play_with_its_own_message() {
+        let (root, config, mut official) = game();
+        with_xess(root.path(), &mut official, b"the game's xess");
+        remember_all(config.path(), root.path(), &official);
+        assert!(check(config.path(), root.path(), &official).ok());
+        std::fs::write(target(root.path(), XESS), b"some other xess build, not in the catalogue").unwrap();
+        let report = check(config.path(), root.path(), &official);
+        assert_eq!(report.replaced, vec![XESS.to_string()]);
+        assert!(report.missing.is_empty() && report.changed.is_empty());
+        let message = report.message();
+        assert!(message.contains("libxess.dll (XeSS) was replaced") && message.contains("DLSS Swapper"), "{message}");
+        // The game's size with other bytes: an ordinary changed file, as before.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(target(root.path(), XESS), b"the game's xesz").unwrap();
+        let report = check(config.path(), root.path(), &official);
+        assert!(report.replaced.is_empty() && report.changed == vec![XESS.to_string()]);
+    }
+
+    /// With SP_TEST_GAME_DIR set to an installed game: its own XeSS and Frame Generation builds are
+    /// in the catalogue and signed by Intel and NVIDIA, so they pass as a player's swap.
+    #[test]
+    fn a_recognised_signed_swap_is_accepted_and_remembered() {
+        let Some(game_dir) = std::env::var_os("SP_TEST_GAME_DIR") else { return };
+        let real = |p: &str| std::fs::read(target(Path::new(&game_dir), p)).unwrap();
+        let (root, config, mut official) = game();
+        with_xess(root.path(), &mut official, b"the game's xess");
+        remember_all(config.path(), root.path(), &official);
+        std::fs::write(target(root.path(), XESS), real(XESS)).unwrap();
+        let report = check(config.path(), root.path(), &official);
+        assert!(report.ok(), "{report:?}");
+        let record = load(config.path());
+        assert_eq!(record.accepted.len(), 1);
+        assert_eq!(record.accepted[0].sha256, "swap: XeSS 1.0.1.12");
+        // Remembered: the next Play does not read it again, and still accepts it.
+        assert!(check(config.path(), root.path(), &official).ok());
+        // The right name and size but not the vendor's file: not accepted.
+        let mut forged = real(XESS);
+        let last = forged.len() - 1;
+        forged[last] ^= 0xFF;
+        std::fs::write(target(root.path(), XESS), forged).unwrap();
+        assert_eq!(check(config.path(), root.path(), &official).replaced, vec![XESS.to_string()]);
+        // A Frame Generation build in the XeSS slot is not XeSS.
+        let dlssg = real("Engine/Plugins/Runtime/Nvidia/Streamline/Binaries/ThirdParty/Win64/nvngx_dlssg.dll");
+        std::fs::write(target(root.path(), XESS), dlssg).unwrap();
+        assert_eq!(check(config.path(), root.path(), &official).replaced, vec![XESS.to_string()]);
     }
 
     #[test]
