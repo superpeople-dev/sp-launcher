@@ -907,10 +907,11 @@ async fn launch_game(
         });
     }
 
-    // #launcher-logs: who started the game, on what PC (hardware.rs).
+    // #launcher-logs: who started the game, on what PC (hardware.rs), and in
+    // which region ("europe", "asia", "dev"; empty from a backend before regions).
     tauri::async_runtime::spawn(async move {
         let pc = tauri::async_runtime::spawn_blocking(hardware::summary).await.unwrap_or_default();
-        auth::report(session, serde_json::json!({ "action": "game.launched", "hardware": pc }));
+        auth::report(session, serde_json::json!({ "action": "game.launched", "hardware": pc, "region": region.region }));
     });
 
     // The launcher used to hide itself here and only reappear when the game
