@@ -781,11 +781,7 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
     });
     if let Some(free) = free {
         if free < needed {
-            return Err(Stop::Failed(format!(
-                "Not enough space on that drive: {} free, about {} needed. Free some space or choose another drive.",
-                gb(free),
-                gb(needed)
-            )));
+            return Err(Stop::Failed(short_of_space(free, needed, "", " or choose another drive.")));
         }
     }
 
@@ -1751,10 +1747,11 @@ async fn from_backup(
     let needed = backup.size - pieces.have() + missing + SPACE_MARGIN;
     if let Some(free) = free_space(temp) {
         if free < needed {
-            return Err(Stop::Failed(format!(
-                "Not enough space on that drive: {} free, about {} needed. Free some space and press Continue -- your progress is kept.",
-                gb(free),
-                gb(needed)
+            return Err(Stop::Failed(short_of_space(
+                free,
+                needed,
+                " (the backup copy needs room for its archive and the unpacked files at once)",
+                ", then press Continue -- your progress is kept.",
             )));
         }
     }
@@ -2327,6 +2324,20 @@ fn eta(left: u64, speed: f64) -> Option<u64> {
 
 fn gb(n: u64) -> String {
     format!("{:.1} GB", n as f64 / (1024.0 * 1024.0 * 1024.0))
+}
+
+/// Not enough room: what is free rounded down, what is needed rounded up, and how much more to
+/// free, so the two never read the same ("58.2 GB free, about 58.2 GB needed" was a refusal).
+fn short_of_space(free: u64, needed: u64, why: &str, then: &str) -> String {
+    let tenths = |n: u64| n as f64 / (1024.0 * 1024.0 * 1024.0) * 10.0;
+    let down = |n: u64| tenths(n).floor() / 10.0;
+    let up = |n: u64| (tenths(n).ceil() / 10.0).max(0.1);
+    format!(
+        "Not enough space on that drive: {:.1} GB free, {:.1} GB needed{why}. Free at least {:.1} GB more{then}",
+        down(free),
+        up(needed).max(down(free) + 0.1),
+        up(needed.saturating_sub(free)),
+    )
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -3151,6 +3162,19 @@ mod tests {
         let damaged: Vec<String> =
             damaged(&ctx, tmp.path(), &files, &missing_now, &mut saved).await.ok().unwrap().into_iter().map(|f| f.path).collect();
         assert_eq!(damaged, ["BravoHotelGame/bad.pak"]);
+    }
+
+    #[test]
+    fn not_enough_space_never_shows_the_same_two_numbers() {
+        const GB: u64 = 1024 * 1024 * 1024;
+        // The case from a player: 58.2 GB free, 58.24 GB needed.
+        let free = 58 * GB + GB / 5 + GB / 100;
+        let needed = 58 * GB + GB / 5 + GB / 25;
+        let message = short_of_space(free, needed, "", ".");
+        assert!(message.contains("58.2 GB free, 58.3 GB needed"), "{message}");
+        assert!(message.contains("Free at least 0.1 GB more."), "{message}");
+        let far = short_of_space(10 * GB, 30 * GB, " (why)", " then.");
+        assert!(far.contains("10.0 GB free, 30.0 GB needed (why). Free at least 20.0 GB more then."), "{far}");
     }
 
     #[test]
