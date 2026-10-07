@@ -259,7 +259,7 @@ mod tests {
 
     /// No Demos folder: every report goes without a replay, asking nobody for one.
     fn no_replays() -> crate::replays::Ctx {
-        crate::replays::Ctx { demos: None, site: "http://127.0.0.1:9".into(), running: false }
+        crate::replays::Ctx { demos: None, logs: None, site: "http://127.0.0.1:9".into(), running: false }
     }
 
     /// One request as a test server saw it: the request line and headers, and the body.
@@ -345,7 +345,7 @@ mod tests {
                 .into_boxed_str(),
         );
         let (base, server) = server_on(port, vec![(200, started), (200, ""), (204, ""), (204, "")]).await;
-        let ctx = crate::replays::Ctx { demos: Some(demos.path().to_path_buf()), site: base.clone(), running: false };
+        let ctx = crate::replays::Ctx { demos: Some(demos.path().to_path_buf()), logs: None, site: base.clone(), running: false };
         let url = format!("{base}/api/launcher/report");
         assert_eq!(send_all(&url, "session-token", dir.path(), &AtomicBool::new(false), &ctx).await, 2);
         let seen = server.await.unwrap();
@@ -373,7 +373,7 @@ mod tests {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
         match_recording(demos.path(), "kapi_now", now - 5 * 60_000, true);
         let file = report(dir.path(), &format!("report-{}-1-1.json", now - 60_000), r#"{"v":1}"#);
-        let ctx = crate::replays::Ctx { demos: Some(demos.path().to_path_buf()), site: "http://127.0.0.1:9".into(), running: true };
+        let ctx = crate::replays::Ctx { demos: Some(demos.path().to_path_buf()), logs: None, site: "http://127.0.0.1:9".into(), running: true };
         // Nobody listens: had it asked anyone, it would have been told nothing.
         assert_eq!(send_all("http://127.0.0.1:9/x", "s", dir.path(), &AtomicBool::new(false), &ctx).await, 0);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), r#"{"v":1}"#, "untouched until the match is over");

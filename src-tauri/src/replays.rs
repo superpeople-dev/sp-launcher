@@ -14,8 +14,16 @@
 //! then carries the replay's page, https://superpeople.dev/replays/<id>, which
 //! needs no sign-in and is kept 30 days.
 //!
-//! A report made during a match waits for that match to end, since the
-//! recording is only whole then, but not longer than [`WAIT`].
+//! A report made during a match waits for that match to end, but not longer
+//! than [`WAIT`]: the game (its MK3D replay streamer) keeps the recording in
+//! memory and writes the whole folder at once when the match is over, so until
+//! then there is nothing in Demos to find. 07.10.2026: reports made in a match
+//! went out at once with "no recording", since nothing was there yet.
+//!
+//! A report made in the game's Replay menu is about the recording being
+//! watched, an earlier match. The game logs the one picked there
+//! (`LogTemp: Display: Selected ReplayName = <its folder>`), so the last such
+//! line before the report names it ([`watched`]).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -46,10 +54,18 @@ pub fn demos_dir() -> Option<PathBuf> {
     Some(Path::new(&base).join("BravoHotelGame").join("Saved").join("Demos"))
 }
 
+/// The game's log folder.
+pub fn logs_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    Some(Path::new(&base).join("BravoHotelGame").join("Saved").join("Logs"))
+}
+
 /// Where a replay comes from and goes to.
 pub struct Ctx {
     /// The game's Demos folder; `None` when there is none to look in.
     pub demos: Option<PathBuf>,
+    /// The game's log folder, which says what the Replay menu played.
+    pub logs: Option<PathBuf>,
     /// The website, which hands out the upload link (`/api/launcher/replays`).
     pub site: String,
     /// Whether the game is still running: a report may then wait for its match.
@@ -58,7 +74,7 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn live(running: bool) -> Self {
-        Ctx { demos: demos_dir(), site: crate::auth::site_url(), running }
+        Ctx { demos: demos_dir(), logs: logs_dir(), site: crate::auth::site_url(), running }
     }
 }
 
@@ -172,6 +188,74 @@ fn user_of(replay: &str) -> &str {
         Some((user, _)) if user.len() == 32 && user.bytes().all(|b| b.is_ascii_hexdigit()) => user,
         _ => "",
     }
+}
+
+/// The game's EReportType for a report made in its Replay menu.
+const FROM_REPLAY_MENU: u64 = 2;
+
+/// What the game logs when a replay is picked in its Replay menu (the replay
+/// list's widget, RVA 0x182AA20, LogTemp at Display): the recording's folder.
+const SELECTED: &str = "LogTemp: Display: Selected ReplayName = ";
+
+/// `[2026.10.07-22.15.42:745]` at the start of a game log line, Unreal's UTC,
+/// as ms since 1970.
+fn ue_stamp(line: &str) -> Option<u64> {
+    let s = line.as_bytes();
+    if s.len() < 25 || s[0] != b'[' || s[24] != b']' {
+        return None;
+    }
+    let num = |a: usize, b: usize| line.get(a..b).and_then(|t| t.parse::<i64>().ok());
+    let (y, mo, d) = (num(1, 5)?, num(6, 8)?, num(9, 11)?);
+    let (h, mi, sec, milli) = (num(12, 14)?, num(15, 17)?, num(18, 20)?, num(21, 24)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 {
+        return None;
+    }
+    // Days since 1970 of a proleptic Gregorian date (Howard Hinnant's days_from_civil).
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    u64::try_from(((days * 24 + h) * 60 + mi) * 60_000 + sec * 1000 + milli).ok()
+}
+
+/// The recording last picked in the game's Replay menu before `at` (ms): its
+/// folder's name, from the `Selected ReplayName` lines of the game's logs
+/// written since then (the current one and its backups, so a report sent after
+/// the game was closed or started again still finds it).
+pub fn watched(logs: &Path, at: u64) -> Option<String> {
+    use std::io::BufRead;
+    let Ok(entries) = std::fs::read_dir(logs) else { return None };
+    let files: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with("BravoHotelGame") && name.ends_with(".log") && !name.contains("Critical")
+        })
+        .filter(|e| e.metadata().and_then(|m| m.modified()).map(ms).is_ok_and(|t| t + SLACK_MS >= at))
+        .map(|e| e.path())
+        .collect();
+    let mut best: Option<(u64, String)> = None;
+    for file in files {
+        let Ok(f) = std::fs::File::open(&file) else { continue };
+        let mut reader = std::io::BufReader::new(f);
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let line = String::from_utf8_lossy(&buf);
+            let Some(i) = line.find(SELECTED) else { continue };
+            let name = line[i + SELECTED.len()..].trim();
+            let Some(stamp) = ue_stamp(&line) else { continue };
+            if stamp <= at + SLACK_MS && folder_ok(name) && best.as_ref().is_none_or(|(t, _)| stamp >= *t) {
+                best = Some((stamp, name.to_string()));
+            }
+        }
+    }
+    best.map(|(_, name)| name)
 }
 
 // --------------------------------------------------------------- zip ---
@@ -336,7 +420,23 @@ pub async fn attach(ctx: &Ctx, session: &str, reports: &Path, report: &mut Map<S
     let age = ms(SystemTime::now()).saturating_sub(at);
     let may_wait = ctx.running && age < WAIT.as_millis() as u64;
     let user = report.get("replay").and_then(Value::as_str).map(|r| user_of(r).to_string()).unwrap_or_default();
-    let Some(rec) = ctx.demos.as_deref().and_then(|d| pick(&recordings(d), at, &user)) else {
+    let list = ctx.demos.as_deref().map(recordings).unwrap_or_default();
+    // Made in the Replay menu: the recording being watched, whichever match it was.
+    let from_menu = report.get("type").and_then(Value::as_u64) == Some(FROM_REPLAY_MENU);
+    let in_menu = || {
+        let name = ctx.logs.as_deref().and_then(|l| watched(l, at))?;
+        list.iter().find(|r| r.dir.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&name))).cloned()
+    };
+    let found = if from_menu { in_menu() } else { None }.or_else(|| pick(&list, at, &user));
+    let Some(rec) = found else {
+        // A match's recording appears only once the match is over (the game writes it all
+        // then): while the game runs, wait for it. Not for one from the Replay menu, which is
+        // there already or never comes, nor once a match that began after the report has been
+        // written, since the reported match ended before it and left nothing.
+        let later_match = list.iter().any(|r| r.start.is_some_and(|s| s > at + SLACK_MS));
+        if may_wait && !from_menu && !later_match {
+            return Step::Wait;
+        }
         return note(report, "missing");
     };
     if !rec.finished && may_wait {
@@ -640,6 +740,121 @@ mod tests {
         // Between matches (the lobby, or watching an old replay): none of them.
         assert_eq!(pick(&list, t0 + 25 * MIN, ME), None);
         assert_eq!(pick(&list, t0 + 90 * MIN, ME), None);
+    }
+
+    #[test]
+    fn a_log_lines_time_is_read_as_unreal_writes_it() {
+        // The game's own: this line came with the recording whose Timestamp is 1791410441152.
+        assert_eq!(ue_stamp("[2026.10.07-22.00.41:152][873]LogDemo: Warning: x"), Some(1_791_410_441_152));
+        assert_eq!(ue_stamp("[1970.01.01-00.00.00:000][  0]x"), Some(0));
+        assert_eq!(ue_stamp("[2024.02.29-12.00.00:000][  0]x"), Some(1_709_208_000_000));
+        assert_eq!(ue_stamp("LogTemp: Display: no time"), None);
+        assert_eq!(ue_stamp("[2026.13.07-22.00.41:152][  0]x"), None);
+    }
+
+    /// A game log with these lines, last written at `modified` (ms).
+    fn game_log(dir: &Path, name: &str, lines: &[&str], modified: u64) {
+        let path = dir.join(name);
+        std::fs::write(&path, lines.join("\r\n") + "\r\n").unwrap();
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(UNIX_EPOCH + Duration::from_millis(modified)).unwrap();
+    }
+
+    /// 2026.10.07-22.00.41:152 UTC.
+    const AT: u64 = 1_791_410_441_152;
+
+    #[test]
+    fn the_replay_menu_names_the_recording_being_watched() {
+        let logs = tempfile::tempdir().unwrap();
+        game_log(
+            logs.path(),
+            "BravoHotelGame.log",
+            &[
+                "[2026.10.07-21.50.00:000][  1]LogTemp: Display: Selected ReplayName = kapi_2026-10-01_20-25",
+                "[2026.10.07-21.55.00:000][  2]LogTemp: Display: Selected ReplayName = kapi_2026-10-03_21-54",
+                "[2026.10.07-21.56.00:000][  3]LogTemp: Display: Selected ReplayName = ..\\..\\Windows",
+                "[2026.10.07-21.57.00:000][  4]LogDemo: Display: anything else",
+                "[2026.10.07-22.10.00:000][  5]LogTemp: Display: Selected ReplayName = kapi_picked_later",
+            ],
+            AT + 20 * MIN,
+        );
+        // A game before this one: its log was done before the report was made.
+        game_log(
+            logs.path(),
+            "BravoHotelGame-backup-2026.10.06-10.00.00.log",
+            &["[2026.10.07-21.58.00:000][  1]LogTemp: Display: Selected ReplayName = kapi_old_game"],
+            AT - 24 * 60 * MIN,
+        );
+        assert_eq!(watched(logs.path(), AT).as_deref(), Some("kapi_2026-10-03_21-54"), "the last one picked before the report, a real folder name");
+        assert_eq!(watched(logs.path(), AT - 30 * MIN), None, "nothing picked yet then");
+        assert_eq!(watched(&logs.path().join("none"), AT), None);
+    }
+
+    fn test_ctx(demos: &Path, logs: Option<&Path>, running: bool) -> Ctx {
+        Ctx { demos: Some(demos.to_path_buf()), logs: logs.map(Path::to_path_buf), site: "http://127.0.0.1:9".into(), running }
+    }
+
+    /// A replay sent before, so linking it asks the website nothing.
+    fn sent_before(reports: &Path, name: &str, start: u64) {
+        let list = serde_json::json!({ format!("{name}|{start}"): { "url": "https://superpeople.dev/replays/abab", "bytes": 7, "at": ms(SystemTime::now()) } });
+        std::fs::write(reports.join(SENT_FILE), list.to_string()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_report_made_in_a_match_waits_for_its_recording_while_the_game_runs() {
+        let (demos, reports) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let now = ms(SystemTime::now());
+        let at = now - MIN;
+        // The match is still on: the game has written nothing of it yet.
+        let mut report = Map::new();
+        assert_eq!(attach(&test_ctx(demos.path(), None, true), "s", reports.path(), &mut report, at).await, Step::Wait);
+        assert!(report.is_empty());
+        // The game was closed and never wrote it: the report goes without.
+        assert_eq!(attach(&test_ctx(demos.path(), None, false), "s", reports.path(), &mut report, at).await, Step::Done);
+        assert_eq!(report.get("replay_note").and_then(Value::as_str), Some("missing"));
+        // A match that began after the report has been written: the reported one left nothing.
+        let next = recording(demos.path(), "kapi_next", Some((now + 5 * MIN, 10 * MIN, false, ME)), true);
+        let mut report = Map::new();
+        assert_eq!(attach(&test_ctx(demos.path(), None, true), "s", reports.path(), &mut report, at).await, Step::Done);
+        assert_eq!(report.get("replay_note").and_then(Value::as_str), Some("missing"));
+        std::fs::remove_dir_all(next).unwrap();
+        // The match is over and its recording is there: the report links it.
+        recording(demos.path(), "kapi_this", Some((at - 5 * MIN, 20 * MIN, false, ME)), true);
+        sent_before(reports.path(), "kapi_this", at - 5 * MIN);
+        let mut report = Map::new();
+        assert_eq!(attach(&test_ctx(demos.path(), None, true), "s", reports.path(), &mut report, at).await, Step::Done);
+        assert_eq!(report.get("replay_match").and_then(Value::as_str), Some("kapi_this"));
+        assert_eq!(report.get("replay_url").and_then(Value::as_str), Some("https://superpeople.dev/replays/abab"));
+    }
+
+    #[tokio::test]
+    async fn a_report_from_the_replay_menu_takes_the_recording_being_watched() {
+        let (demos, reports, logs) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        // A match of three days before, watched in the Replay menu.
+        let start = AT - 3 * 24 * 60 * MIN;
+        recording(demos.path(), "kapi_2026-10-04_20-05", Some((start, 20 * MIN, false, ME)), true);
+        sent_before(reports.path(), "kapi_2026-10-04_20-05", start);
+        game_log(
+            logs.path(),
+            "BravoHotelGame.log",
+            &["[2026.10.07-21.55.00:000][  2]LogTemp: Display: Selected ReplayName = kapi_2026-10-04_20-05"],
+            AT + MIN,
+        );
+        let mut report = Map::new();
+        report.insert("type".into(), FROM_REPLAY_MENU.into());
+        assert_eq!(attach(&test_ctx(demos.path(), Some(logs.path()), false), "s", reports.path(), &mut report, AT).await, Step::Done);
+        assert_eq!(report.get("replay_match").and_then(Value::as_str), Some("kapi_2026-10-04_20-05"));
+        // The same report made in a match (death cam): no match ran then, and the menu does not count.
+        let mut report = Map::new();
+        report.insert("type".into(), 3.into());
+        assert_eq!(attach(&test_ctx(demos.path(), Some(logs.path()), false), "s", reports.path(), &mut report, AT).await, Step::Done);
+        assert_eq!(report.get("replay_note").and_then(Value::as_str), Some("missing"));
+        // From the Replay menu with nothing in the log: no waiting, even while the game runs.
+        let now = ms(SystemTime::now());
+        let mut report = Map::new();
+        report.insert("type".into(), FROM_REPLAY_MENU.into());
+        assert_eq!(attach(&test_ctx(demos.path(), None, true), "s", reports.path(), &mut report, now - MIN).await, Step::Done);
+        assert_eq!(report.get("replay_note").and_then(Value::as_str), Some("missing"));
     }
 
     #[test]
