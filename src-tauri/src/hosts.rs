@@ -21,6 +21,14 @@
 //!
 //! The block editing is pure string work and unit-tested; only the file IO,
 //! the elevation and the DNS flush are Windows-specific.
+//!
+//! When the write fails even with admin rights, the message names what is in
+//! the way: the program holding the file open (Windows' Restart Manager
+//! knows it), or, for a plain "access denied" (a security program's file
+//! filter refuses it without saying who), the security programs running on
+//! the PC. A read-only hosts file, which some "hosts protection" tools leave
+//! behind, is simply written anyway and set read-only again. The elevated
+//! helper hands its message to the launcher in `hosts-error.txt`.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -273,14 +281,29 @@ pub fn writable() -> bool {
 
 fn write(content: &str) -> Result<()> {
     let path = hosts_path();
-    // No temp-file-and-rename here: the hosts file has an ACL and replacing it
-    // with a fresh file loses that. Writing in place keeps the ACL intact.
-    std::fs::write(&path, content).map_err(|e| {
-        LauncherError::Message(format!(
-            "cannot write {} ({e}). The launcher needs to run as administrator.",
-            path.display()
-        ))
-    })
+    write_in_place(&path, content).map_err(|e| LauncherError::Message(explain_write_error(&path, &e)))
+}
+
+/// No temp-file-and-rename here: the hosts file has an ACL and replacing it
+/// with a fresh file loses that. Writing in place keeps the ACL intact. A
+/// read-only file (set by some "hosts protection" tools) is made writable for
+/// the write and read-only again after it.
+// Windows only: set_readonly(false) clears FILE_ATTRIBUTE_READONLY, it does not
+// open the file to everyone as it would on Unix.
+#[allow(clippy::permissions_set_readonly_false)]
+fn write_in_place(path: &Path, content: &str) -> std::io::Result<()> {
+    let mut perms = std::fs::metadata(path)?.permissions();
+    let was_read_only = perms.readonly();
+    if was_read_only {
+        perms.set_readonly(false);
+        std::fs::set_permissions(path, perms.clone())?;
+    }
+    let res = std::fs::write(path, content);
+    if was_read_only {
+        perms.set_readonly(true);
+        let _ = std::fs::set_permissions(path, perms);
+    }
+    res
 }
 
 pub fn flush_dns() {
@@ -393,10 +416,9 @@ pub fn ensure(config_dir: &Path) -> Result<()> {
     if is_current(&read().unwrap_or_default(), BACKEND_IP, &hosts) {
         Ok(())
     } else {
-        Err(LauncherError::Message(
-            "The hosts entries could not be written. An antivirus may be blocking changes to the hosts file."
-                .into(),
-        ))
+        // The helper wrote the block (it exits 1 otherwise), so something took
+        // it out again right away.
+        Err(LauncherError::Message(reverted_message(&running_security_programs())))
     }
 }
 
@@ -421,8 +443,19 @@ pub fn helper_main() -> Option<i32> {
         "remove" => remove(&dir),
         _ => return Some(2),
     };
-    Some(if res.is_ok() { 0 } else { 1 })
+    match res {
+        Ok(()) => Some(0),
+        Err(e) => {
+            // The launcher that started this helper shows it (run_elevated).
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join(HELPER_ERROR), e.to_string());
+            Some(1)
+        }
+    }
 }
+
+/// The elevated helper's error message, for the launcher that waits for it.
+const HELPER_ERROR: &str = "hosts-error.txt";
 
 #[cfg(target_os = "windows")]
 fn run_elevated(action: &str, config_dir: &Path) -> Result<()> {
@@ -441,6 +474,8 @@ fn run_elevated(action: &str, config_dir: &Path) -> Result<()> {
     let exe = wide(&std::env::current_exe()?.display().to_string());
     let verb = wide("runas");
     let params = wide(&format!("--sp-hosts {action} \"{dir}\""));
+    let error_file = config_dir.join(HELPER_ERROR);
+    let _ = std::fs::remove_file(&error_file);
 
     // SAFETY: plain Win32 calls; every pointer outlives the call that uses it.
     unsafe {
@@ -469,9 +504,12 @@ fn run_elevated(action: &str, config_dir: &Path) -> Result<()> {
         GetExitCodeProcess(info.hProcess, &mut code);
         CloseHandle(info.hProcess);
         if code != 0 {
-            return Err(LauncherError::Message(
-                "The hosts file could not be changed, even with admin rights. An antivirus may be blocking it.".into(),
-            ));
+            let why = std::fs::read_to_string(&error_file).ok().filter(|m| !m.trim().is_empty());
+            let _ = std::fs::remove_file(&error_file);
+            return Err(LauncherError::Message(why.unwrap_or_else(|| {
+                "The hosts file could not be changed, even with admin rights. A security program may be blocking it."
+                    .into()
+            })));
         }
     }
     Ok(())
@@ -480,6 +518,241 @@ fn run_elevated(action: &str, config_dir: &Path) -> Result<()> {
 #[cfg(not(target_os = "windows"))]
 fn run_elevated(_action: &str, _config_dir: &Path) -> Result<()> {
     Err(LauncherError::Message("elevation is only meaningful on Windows".into()))
+}
+
+// ------------------------------------------------------------- diagnosis ---
+
+/// Security programs by the executable name of one of their processes
+/// (lowercase). A file filter that refuses the write does not say who it is,
+/// so the running ones are named instead.
+const SECURITY_PROGRAMS: &[(&str, &str)] = &[
+    ("avp.exe", "Kaspersky"),
+    ("avpui.exe", "Kaspersky"),
+    ("avastsvc.exe", "Avast"),
+    ("avastui.exe", "Avast"),
+    ("avgsvc.exe", "AVG"),
+    ("avgui.exe", "AVG"),
+    ("vsserv.exe", "Bitdefender"),
+    ("bdservicehost.exe", "Bitdefender"),
+    ("bdagent.exe", "Bitdefender"),
+    ("ekrn.exe", "ESET"),
+    ("egui.exe", "ESET"),
+    ("mbamservice.exe", "Malwarebytes"),
+    ("mbamtray.exe", "Malwarebytes"),
+    ("nortonsecurity.exe", "Norton"),
+    ("ns.exe", "Norton"),
+    ("nswscsvc.exe", "Norton"),
+    ("mcshield.exe", "McAfee"),
+    ("mfemms.exe", "McAfee"),
+    ("mfevtps.exe", "McAfee"),
+    ("avguard.exe", "Avira"),
+    ("avira.servicehost.exe", "Avira"),
+    ("sophoshealth.exe", "Sophos"),
+    ("savservice.exe", "Sophos"),
+    ("coreserviceshell.exe", "Trend Micro"),
+    ("pccntmon.exe", "Trend Micro"),
+    ("wrsa.exe", "Webroot"),
+    ("psanhost.exe", "Panda"),
+    ("360tray.exe", "360 Total Security"),
+    ("360sd.exe", "360 Total Security"),
+    ("zhudongfangyu.exe", "360 Total Security"),
+    ("hipsdaemon.exe", "Huorong"),
+    ("hipstray.exe", "Huorong"),
+    ("qqpcrtp.exe", "Tencent PC Manager"),
+    ("qqpctray.exe", "Tencent PC Manager"),
+    ("kxetray.exe", "Kingsoft Antivirus"),
+    ("fshoster32.exe", "F-Secure"),
+    ("fsorsp64.exe", "F-Secure"),
+    ("avkwctl.exe", "G DATA"),
+    ("avk.exe", "G DATA"),
+    ("vsmon.exe", "ZoneAlarm"),
+    ("cmdagent.exe", "Comodo"),
+    ("cis.exe", "Comodo"),
+    ("a2service.exe", "Emsisoft"),
+    ("dwservice.exe", "Dr.Web"),
+    ("spideragent.exe", "Dr.Web"),
+    ("k7tsmngr.exe", "K7"),
+    ("smadav.exe", "Smadav"),
+    ("adawareservice.exe", "Adaware"),
+    ("bullguardsvc.exe", "BullGuard"),
+    ("qhactivedefense.exe", "Quick Heal"),
+    ("sdfssvc.exe", "Spybot"),
+    ("csfalconservice.exe", "CrowdStrike Falcon"),
+    ("sentinelagent.exe", "SentinelOne"),
+    ("msmpeng.exe", "Microsoft Defender"),
+];
+
+/// The security programs among these running executables (lowercase names),
+/// each once, in the table's order. Microsoft Defender comes last: with another
+/// one installed it steps back, and it does not block hosts edits itself.
+pub fn security_programs_in(running: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (exe, product) in SECURITY_PROGRAMS {
+        if running.iter().any(|r| r == exe) && !out.iter().any(|o| o == product) {
+            out.push((*product).to_string());
+        }
+    }
+    out
+}
+
+const DEFENDER: &str = "Microsoft Defender";
+
+/// What to tell the player when writing the hosts file failed with admin
+/// rights. `holders` are the programs that have the file open, `security` the
+/// security programs that are running, `detail` the system's own message.
+pub fn blocked_message(os_error: Option<i32>, holders: &[String], security: &[String], detail: &str) -> String {
+    const SHARING_VIOLATION: i32 = 32;
+    const LOCK_VIOLATION: i32 = 33;
+    const ACCESS_DENIED: i32 = 5;
+    let path = hosts_path().display().to_string();
+    match os_error {
+        Some(SHARING_VIOLATION) | Some(LOCK_VIOLATION) if !holders.is_empty() => format!(
+            "{} has the hosts file open and locked, so the launcher could not change it. \
+             Close it or allow the SUPER PEOPLE launcher in it, then press Play again.",
+            holders.join(", ")
+        ),
+        Some(SHARING_VIOLATION) | Some(LOCK_VIOLATION) => "Another program has the hosts file open and locked, so the launcher \
+             could not change it. Restart the PC and press Play again."
+            .into(),
+        Some(ACCESS_DENIED) => {
+            let others: Vec<&String> = security.iter().filter(|p| p.as_str() != DEFENDER).collect();
+            match others.as_slice() {
+                [one] => format!(
+                    "{one} is blocking changes to the hosts file. Allow the SUPER PEOPLE launcher in {one} \
+                     (or pause its protection for a moment), then press Play again."
+                ),
+                [first, ..] => format!(
+                    "A security program is blocking changes to the hosts file. Running on this PC: {}. \
+                     Allow the SUPER PEOPLE launcher in {first} (or pause its protection for a moment), \
+                     then press Play again.",
+                    others.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                ),
+                [] => format!(
+                    "Windows refused the change to the hosts file even with admin rights{}. \
+                     Check Windows Security, Protection history, for a blocked action, and the file's \
+                     permissions: right-click {path}, Properties, Security, and give Administrators \
+                     \"Modify\". Then press Play again.",
+                    if security.iter().any(|p| p == DEFENDER) {
+                        ", and Microsoft Defender is the only security program running"
+                    } else {
+                        ", and no security program was found running"
+                    }
+                ),
+            }
+        }
+        _ => format!("The hosts file ({path}) could not be changed: {detail}"),
+    }
+}
+
+/// The helper wrote the block, but it was gone again right after.
+pub fn reverted_message(security: &[String]) -> String {
+    let others: Vec<&String> = security.iter().filter(|p| p.as_str() != DEFENDER).collect();
+    match others.first() {
+        Some(first) => format!(
+            "The hosts entries were written, but something removed them right away. Running on this PC: {}. \
+             Allow the SUPER PEOPLE launcher or the hosts file in {first}, then press Play again.",
+            others.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+        ),
+        None => "The hosts entries were written, but something removed them right away. If a \"hosts protection\" \
+                 tool or a security program is installed, allow the SUPER PEOPLE launcher in it, then press Play again."
+            .into(),
+    }
+}
+
+fn explain_write_error(path: &Path, e: &std::io::Error) -> String {
+    let os = e.raw_os_error();
+    let holders = if matches!(os, Some(32) | Some(33)) { programs_holding(path) } else { Vec::new() };
+    blocked_message(os, &holders, &running_security_programs(), &e.to_string())
+}
+
+/// Running processes: (process id, lowercase executable name).
+#[cfg(target_os = "windows")]
+fn running_processes() -> Vec<(u32, String)> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+    let mut out = Vec::new();
+    // SAFETY: plain Win32 calls on a snapshot handle this function owns.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return out;
+        }
+        let mut item: PROCESSENTRY32W = std::mem::zeroed();
+        item.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut more = Process32FirstW(snapshot, &mut item) != 0;
+        while more {
+            let len = item.szExeFile.iter().position(|&c| c == 0).unwrap_or(item.szExeFile.len());
+            out.push((item.th32ProcessID, String::from_utf16_lossy(&item.szExeFile[..len]).to_ascii_lowercase()));
+            more = Process32NextW(snapshot, &mut item) != 0;
+        }
+        CloseHandle(snapshot);
+    }
+    out
+}
+
+#[cfg(not(target_os = "windows"))]
+fn running_processes() -> Vec<(u32, String)> {
+    Vec::new()
+}
+
+fn running_security_programs() -> Vec<String> {
+    let names: Vec<String> = running_processes().into_iter().map(|(_, n)| n).collect();
+    security_programs_in(&names)
+}
+
+/// The programs that have `path` open, as "<name> (<exe>)", from Windows'
+/// Restart Manager.
+#[cfg(target_os = "windows")]
+fn programs_holding(path: &Path) -> Vec<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::RestartManager::{
+        RmEndSession, RmGetList, RmRegisterResources, RmStartSession, CCH_RM_SESSION_KEY, RM_PROCESS_INFO,
+    };
+    const ERROR_MORE_DATA: u32 = 234;
+    let file: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let processes = running_processes();
+    let mut out = Vec::new();
+    // SAFETY: plain Win32 calls; every buffer outlives the call that uses it,
+    // and the session is ended before returning.
+    unsafe {
+        let mut session: u32 = 0;
+        let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
+        if RmStartSession(&mut session, 0, key.as_mut_ptr()) != 0 {
+            return out;
+        }
+        let files = [file.as_ptr()];
+        if RmRegisterResources(session, 1, files.as_ptr(), 0, std::ptr::null(), 0, std::ptr::null()) == 0 {
+            let (mut needed, mut count, mut reasons) = (0u32, 0u32, 0u32);
+            let first = RmGetList(session, &mut needed, &mut count, std::ptr::null_mut(), &mut reasons);
+            if (first == ERROR_MORE_DATA || first == 0) && needed > 0 {
+                let mut infos: Vec<RM_PROCESS_INFO> = vec![std::mem::zeroed(); needed as usize];
+                count = needed;
+                if RmGetList(session, &mut needed, &mut count, infos.as_mut_ptr(), &mut reasons) == 0 {
+                    for info in infos.iter().take(count as usize) {
+                        let len = info.strAppName.iter().position(|&c| c == 0).unwrap_or(info.strAppName.len());
+                        let name = String::from_utf16_lossy(&info.strAppName[..len]);
+                        let pid = info.Process.dwProcessId;
+                        let exe = processes.iter().find(|(p, _)| *p == pid).map(|(_, n)| n.clone());
+                        out.push(match exe {
+                            Some(exe) if !name.is_empty() && !name.eq_ignore_ascii_case(&exe) => format!("{name} ({exe})"),
+                            Some(exe) => exe,
+                            None if !name.is_empty() => name,
+                            None => format!("process {pid}"),
+                        });
+                    }
+                }
+            }
+        }
+        RmEndSession(session);
+    }
+    out
+}
+
+#[cfg(not(target_os = "windows"))]
+fn programs_holding(_path: &Path) -> Vec<String> {
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -575,5 +848,71 @@ mod tests {
         let applied = with_block(&manual, "127.0.0.1", &hosts());
         let restored = restore_conflicts(&strip_block(&applied));
         assert_eq!(restored, manual, "the disabled line comes back byte-for-byte");
+    }
+
+    #[test]
+    fn names_the_security_programs_once_with_defender_last() {
+        let running: Vec<String> = ["explorer.exe", "msmpeng.exe", "avp.exe", "avpui.exe", "ekrn.exe"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(security_programs_in(&running), vec!["Kaspersky", "ESET", "Microsoft Defender"]);
+        assert!(security_programs_in(&["explorer.exe".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn a_lock_names_the_program_holding_the_file() {
+        let m = blocked_message(Some(32), &["Kaspersky Anti-Virus (avp.exe)".into()], &[], "in use");
+        assert!(m.starts_with("Kaspersky Anti-Virus (avp.exe) has the hosts file open"), "{m}");
+        let m = blocked_message(Some(32), &[], &[], "in use");
+        assert!(m.starts_with("Another program has the hosts file open"), "{m}");
+    }
+
+    #[test]
+    fn access_denied_names_the_security_program_not_defender() {
+        let m = blocked_message(Some(5), &[], &["Kaspersky".into(), DEFENDER.into()], "denied");
+        assert!(m.starts_with("Kaspersky is blocking changes to the hosts file."), "{m}");
+        let m = blocked_message(Some(5), &[], &["Avast".into(), "Malwarebytes".into(), DEFENDER.into()], "denied");
+        assert!(m.contains("Running on this PC: Avast, Malwarebytes."), "{m}");
+        assert!(m.contains("Allow the SUPER PEOPLE launcher in Avast"), "{m}");
+        let m = blocked_message(Some(5), &[], &[DEFENDER.into()], "denied");
+        assert!(m.contains("Microsoft Defender is the only security program running"), "{m}");
+        let m = blocked_message(Some(5), &[], &[], "denied");
+        assert!(m.contains("no security program was found running"), "{m}");
+    }
+
+    #[test]
+    fn other_errors_keep_the_system_message() {
+        let m = blocked_message(Some(112), &[], &[], "There is not enough space on the disk.");
+        assert!(m.ends_with("could not be changed: There is not enough space on the disk."), "{m}");
+    }
+
+    #[test]
+    fn a_reverted_block_names_what_runs() {
+        assert!(reverted_message(&["Bitdefender".into(), DEFENDER.into()]).contains("Running on this PC: Bitdefender."));
+        assert!(reverted_message(&[DEFENDER.into()]).contains("hosts protection"));
+    }
+
+    #[test]
+    fn a_read_only_file_is_written_and_stays_read_only() {
+        let dir = std::env::temp_dir().join(format!("sp-hosts-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("hosts");
+        std::fs::write(&file, "old").unwrap();
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file, perms).unwrap();
+
+        write_in_place(&file, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
+        assert!(std::fs::metadata(&file).unwrap().permissions().readonly());
+
+        #[allow(clippy::permissions_set_readonly_false)]
+        {
+            let mut perms = std::fs::metadata(&file).unwrap().permissions();
+            perms.set_readonly(false);
+            std::fs::set_permissions(&file, perms).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -68,7 +68,11 @@ Rust backend. Windows only.
   file that points the game's `bravohotel.io` hostnames at the backend. This
   takes a single UAC prompt through a small elevated helper
   (`--sp-hosts apply`). The block then stays, so later starts need no prompt.
-  Settings can show, set up or remove it (`src-tauri/src/hosts.rs`).
+  Settings can show, set up or remove it (`src-tauri/src/hosts.rs`). If the
+  write fails even with admin rights, the message names what is in the way:
+  the program holding the file open (Restart Manager), or the security
+  programs running on the PC for an "access denied". A read-only hosts file
+  is written anyway and set read-only again.
 - **No-Steam fix.** Before each launch the embedded `XAPOFX1_5.dll` proxy is
   written into the game's `Win64` folder, so the client does not wait for Steam
   (`src-tauri/src/shim.rs`, `src-tauri/resources/README.md`).
