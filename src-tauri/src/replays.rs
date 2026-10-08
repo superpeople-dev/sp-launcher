@@ -411,9 +411,14 @@ fn note(report: &mut Map<String, Value>, why: &str) -> Step {
 /// Adds the replay to `report` (made at `at`, ms): `replay_url`, `replay_bytes`
 /// and `replay_match` (the recording's folder), or `replay_note` ("missing",
 /// "too_big", "failed") when it goes without one. A report that has either
-/// already is left as it is. `reports` is the reports folder, which also keeps
-/// what was uploaded.
+/// already is left as it is, except "missing", which is looked for again: a
+/// launcher before 0.4.80 wrote it before the game had written the match, and
+/// the website (0.4.80 and newer only) sent that report back to be kept.
+/// `reports` is the reports folder, which also keeps what was uploaded.
 pub async fn attach(ctx: &Ctx, session: &str, reports: &Path, report: &mut Map<String, Value>, at: u64) -> Step {
+    if report.get("replay_note").and_then(Value::as_str) == Some("missing") {
+        report.remove("replay_note");
+    }
     if report.contains_key("replay_url") || report.contains_key("replay_note") {
         return Step::Done;
     }
@@ -825,6 +830,26 @@ mod tests {
         assert_eq!(attach(&test_ctx(demos.path(), None, true), "s", reports.path(), &mut report, at).await, Step::Done);
         assert_eq!(report.get("replay_match").and_then(Value::as_str), Some("kapi_this"));
         assert_eq!(report.get("replay_url").and_then(Value::as_str), Some("https://superpeople.dev/replays/abab"));
+    }
+
+    #[tokio::test]
+    async fn a_report_an_old_launcher_kept_as_missing_is_looked_for_again() {
+        let (demos, reports) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        // Made in a match a day before; the game wrote the match when it was over.
+        let at = ms(SystemTime::now()) - 24 * 60 * MIN;
+        recording(demos.path(), "kapi_then", Some((at - 5 * MIN, 20 * MIN, false, ME)), true);
+        sent_before(reports.path(), "kapi_then", at - 5 * MIN);
+        let mut report = Map::new();
+        report.insert("replay_note".into(), "missing".into());
+        assert_eq!(attach(&test_ctx(demos.path(), None, false), "s", reports.path(), &mut report, at).await, Step::Done);
+        assert_eq!(report.get("replay_match").and_then(Value::as_str), Some("kapi_then"));
+        assert!(!report.contains_key("replay_note"));
+        // The other notes stand: that replay was looked at and could not go.
+        let mut report = Map::new();
+        report.insert("replay_note".into(), "too_big".into());
+        assert_eq!(attach(&test_ctx(demos.path(), None, false), "s", reports.path(), &mut report, at).await, Step::Done);
+        assert_eq!(report.get("replay_note").and_then(Value::as_str), Some("too_big"));
+        assert!(!report.contains_key("replay_url"));
     }
 
     #[tokio::test]
