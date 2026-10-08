@@ -99,52 +99,63 @@ static TAMPER_SENDING: AtomicBool = AtomicBool::new(false);
 /// Sends the anti-tamper notices the DLL left (`tamper-*.json`) to the site's
 /// tamper endpoint, as the signed-in account -- so a notice only ever concerns
 /// the player who sent it. Simpler than a report: no replay, no match wait.
-pub async fn send_tamper(session: &str, dir: &Path) -> usize {
+/// True when the site banned the player for one (`{ "banned": true }`, a
+/// debugger or a known cheat): the caller closes the game at once.
+pub async fn send_tamper(session: &str, dir: &Path) -> bool {
     if TAMPER_SENDING.swap(true, Ordering::AcqRel) {
-        return 0;
+        return false;
     }
     let url = format!("{}/api/launcher/tamper", crate::auth::site_url());
-    let mut sent = 0;
+    let mut banned = false;
     if let Ok(client) = crate::auth::client() {
         for file in pending(dir, "tamper-") {
             match send_tamper_one(&client, &url, session, &file).await {
-                Outcome::Sent => {
-                    sent += 1;
+                (Outcome::Sent, said) => {
+                    banned |= said;
                     let _ = std::fs::remove_file(&file);
                 }
-                Outcome::Dropped => {
+                (Outcome::Dropped, _) => {
                     let _ = std::fs::remove_file(&file);
                 }
-                Outcome::Later => break,
+                (Outcome::Later, _) => break,
             }
         }
     }
     TAMPER_SENDING.store(false, Ordering::Release);
-    sent
+    banned
 }
 
-async fn send_tamper_one(client: &reqwest::Client, url: &str, session: &str, file: &Path) -> Outcome {
-    let Ok(meta) = std::fs::metadata(file) else { return Outcome::Dropped };
+/// The site's answer to a notice says the player was banned for it.
+fn said_banned(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|answer| answer.get("banned").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
+/// What became of one notice, and whether the site banned the player for it.
+async fn send_tamper_one(client: &reqwest::Client, url: &str, session: &str, file: &Path) -> (Outcome, bool) {
+    let Ok(meta) = std::fs::metadata(file) else { return (Outcome::Dropped, false) };
     let old = meta
         .modified()
         .ok()
         .and_then(|made| SystemTime::now().duration_since(made).ok())
         .is_some_and(|age| age > MAX_AGE);
     if old || meta.len() > MAX_BYTES {
-        return Outcome::Dropped;
+        return (Outcome::Dropped, false);
     }
-    let Ok(text) = std::fs::read_to_string(file) else { return Outcome::Dropped };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { return Outcome::Dropped };
+    let Ok(text) = std::fs::read_to_string(file) else { return (Outcome::Dropped, false) };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { return (Outcome::Dropped, false) };
     if !value.is_object() {
-        return Outcome::Dropped;
+        return (Outcome::Dropped, false);
     }
     let Ok(res) = client.post(url).bearer_auth(session).json(&value).send().await else {
-        return Outcome::Later;
+        return (Outcome::Later, false);
     };
     match res.status().as_u16() {
-        200..=299 => Outcome::Sent,
-        400 | 413 | 422 => Outcome::Dropped,
-        _ => Outcome::Later,
+        200..=299 => (Outcome::Sent, res.text().await.is_ok_and(|body| said_banned(&body))),
+        400 | 413 | 422 => (Outcome::Dropped, false),
+        _ => (Outcome::Later, false),
     }
 }
 
@@ -445,6 +456,15 @@ mod tests {
         assert!(dir.is_dir());
         assert!(pending(&dir, "report-").is_empty());
         assert!(pending(&dir, "tamper-").is_empty());
+    }
+
+    #[test]
+    fn a_tamper_answer_says_banned_only_when_it_does() {
+        assert!(said_banned(r#"{"banned":true}"#));
+        assert!(!said_banned(r#"{"banned":false}"#));
+        assert!(!said_banned(""), "a 204 has no body: not banned");
+        assert!(!said_banned("not json"));
+        assert!(!said_banned(r#"{"banned":"yes"}"#));
     }
 
     #[test]

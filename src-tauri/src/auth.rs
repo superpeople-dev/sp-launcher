@@ -132,6 +132,17 @@ pub struct Ban {
     pub permanent: bool,
     #[serde(default)]
     pub in_match: bool,
+    /// "anticheat": the game client's anti-tamper made it (a debugger, a known
+    /// cheat). The game closes at once, even mid-match, the sign-in stays so
+    /// every start asks again, and the UI shows nothing but this ban.
+    #[serde(default)]
+    pub kind: String,
+}
+
+impl Ban {
+    pub fn anticheat(&self) -> bool {
+        self.kind == "anticheat"
+    }
 }
 
 /// Who the session belongs to now: name, picture and admin rights as the
@@ -1040,7 +1051,11 @@ mod tests {
         assert!(ban.in_match && !ban.permanent);
         // Until lifted: no end.
         let lifted: Ban = serde_json::from_str(r#"{"reason":"cheating","at":1,"until":null,"inMatch":false,"permanent":true}"#).unwrap();
-        assert!(lifted.permanent && lifted.until.is_none());
+        assert!(lifted.permanent && lifted.until.is_none() && !lifted.anticheat());
+        // The anti-tamper's ban says so (sp-website lib/playban.ts), and the UI gets the kind.
+        let tamper: Ban = serde_json::from_str(r#"{"reason":"Anti-cheat: A debugger is attached to the game","at":1,"until":null,"inMatch":true,"permanent":true,"kind":"anticheat"}"#).unwrap();
+        assert!(tamper.anticheat() && tamper.permanent);
+        assert!(serde_json::to_string(&tamper).unwrap().contains("\"kind\":\"anticheat\""));
         // An older website: no ban at all.
         let old: MeOk = serde_json::from_str(r#"{"profile":{"id":"1","name":"P","username":"p"},"banned":false}"#).unwrap();
         assert!(old.ban.is_none());

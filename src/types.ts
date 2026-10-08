@@ -218,4 +218,7 @@ export interface Ban {
   permanent: boolean;
   /** In a match right now: a running game is closed once that round is over. */
   inMatch: boolean;
+  /** "anticheat": the anti-tamper's ban (a debugger, a known cheat). The game closes at once, even
+   *  mid-match, the sign-in stays so every start asks again, and the launcher shows only this ban. */
+  kind?: string;
 }

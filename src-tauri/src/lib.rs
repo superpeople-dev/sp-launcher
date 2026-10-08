@@ -529,15 +529,18 @@ async fn auth_refresh(app: AppHandle, state: State<'_, AppState>) -> Result<Opti
 /// Whether the signed-in player may play, from the website (auth.rs `Ban`).
 /// None: they may. A ban until lifted signs the launcher out here and now (the
 /// website will not let them sign in again); the UI shows why on the welcome
-/// screen. A temporary ban stays on the Play page. Called when the launcher
-/// opens, when it comes back to the front, before Play, and every minute while
-/// the game runs: the UI closes a game whose player is banned once they are
-/// out of their match.
+/// screen. The anti-tamper's ban (a debugger, a known cheat) keeps the sign-in
+/// instead, so every start asks again: the UI shows nothing but that ban, and
+/// lets them back in only once staff lift it. A temporary ban stays on the Play
+/// page. Called when the launcher opens, when it comes back to the front, before
+/// Play, and every minute while the game runs: the UI closes a game whose
+/// player is banned once they are out of their match (at once for the
+/// anti-tamper's ban).
 #[tauri::command]
 async fn ban_status(app: AppHandle, state: State<'_, AppState>) -> Result<Option<auth::Ban>> {
     let Some(session) = session_of(&state)? else { return Ok(None) };
     let (_, ban) = auth::account(&session).await.map_err(|e| expired(&app, &state, e))?;
-    if ban.as_ref().is_some_and(|b| b.permanent) {
+    if ban.as_ref().is_some_and(|b| b.permanent && !b.anticheat()) {
         forget_sign_in(&state)?;
     }
     Ok(ban)
@@ -894,12 +897,20 @@ async fn launch_game(
     if let Some(dir) = reports_dir {
         let running_pid = state.running_pid.clone();
         let session = session.clone();
+        let reports_app = app.clone();
         tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(reports::EVERY).await;
                 let closed = running_pid.lock().map(|running| *running != Some(pid)).unwrap_or(true);
                 reports::send_pending(&session, &dir, !closed).await;
-                reports::send_tamper(&session, &dir).await;
+                // Banned for a debugger or a known cheat (sp-website app/api/launcher/tamper): the
+                // game closes now, even mid-match, and the UI shows only the ban (App.tsx).
+                if reports::send_tamper(&session, &dir).await {
+                    if !closed {
+                        let _ = kill_game(pid);
+                    }
+                    let _ = reports_app.emit("anticheat:banned", ());
+                }
                 if closed {
                     break;
                 }
@@ -962,7 +973,12 @@ fn stop_game(state: State<'_, AppState>) -> Result<()> {
     let Some(pid) = pid else {
         return Err(LauncherError::Message("No game is running".into()));
     };
+    kill_game(pid)
+}
 
+/// Ends the game process and everything it started (Close Game, and the
+/// anti-tamper's ban).
+fn kill_game(pid: u32) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
