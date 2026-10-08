@@ -51,6 +51,26 @@ function rememberAccepted(id: string, accepted: boolean) {
   }
 }
 
+// Banned by the anti-tamper (a debugger, a known cheat): the launcher shows nothing but that ban.
+// Kept on this PC too, so a start shows it at once rather than the Play page for the second the
+// website takes to answer; the answer then replaces it (and lifts it once staff lift the ban).
+const anticheatKey = "sp.anticheat.banned";
+function anticheatBefore(): boolean {
+  try {
+    return localStorage.getItem(anticheatKey) === "1";
+  } catch {
+    return false;
+  }
+}
+function rememberAnticheat(banned: boolean) {
+  try {
+    if (banned) localStorage.setItem(anticheatKey, "1");
+    else localStorage.removeItem(anticheatKey);
+  } catch {
+    // Without storage the ban shows once the website answers.
+  }
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>("play");
   const [config, setConfig] = useState<Config | null>(null);
@@ -68,6 +88,7 @@ export default function App() {
   // a signed-in player never sees the welcome screen flash by; `null` means
   // not connected, and the welcome screen is all there is.
   const [profile, setProfile] = useState<Profile | null | undefined>(undefined);
+  const [anticheat, setAnticheat] = useState(anticheatBefore);
   const [connecting, setConnecting] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -221,7 +242,12 @@ export default function App() {
     }
     knownBan.current = fresh;
     setBan(fresh);
-    if (!fresh) setBanDialog(null);
+    // The anti-tamper's ban keeps the sign-in (lib.rs ban_status) and shows nothing but itself.
+    const locked = fresh?.kind === "anticheat";
+    setAnticheat(locked);
+    rememberAnticheat(locked);
+    if (!fresh || locked) setBanDialog(null);
+    if (locked) return fresh;
     if (fresh?.permanent) {
       setProfile(null);
       setBanDialog(null);
@@ -237,6 +263,15 @@ export default function App() {
       setBan(null);
     }
   }, [profileId, checkBan]);
+
+  // Signed out (the sign-in expired): nothing left to ask with, so the welcome screen comes back and
+  // the website says at sign-in whether the ban still stands.
+  useEffect(() => {
+    if (profile === null) {
+      setAnticheat(false);
+      rememberAnticheat(false);
+    }
+  }, [profile]);
 
   // Each answer (at start, on focus, after accepting) is the one shown next time.
   useEffect(() => {
@@ -268,12 +303,14 @@ export default function App() {
 
   // While the game runs, the ban is asked about every minute. A banned player is
   // left to finish the match they are in; out of it, the launcher closes the game
-  // and says why (their next round is refused by the backend anyway).
+  // and says why (their next round is refused by the backend anyway). The
+  // anti-tamper's ban closes it at once, match or not (lib.rs closes it sooner
+  // still, as soon as the report that made it is answered).
   useEffect(() => {
     if (!busy || !profileId) return;
     const id = window.setInterval(() => {
       void checkBan().then((now) => {
-        if (!now || now.inMatch) return;
+        if (!now || (now.inMatch && now.kind !== "anticheat")) return;
         void invoke("stop_game").catch(() => {});
         if (!now.permanent) setBanDialog("closed");
       });
@@ -456,11 +493,13 @@ export default function App() {
         setError(null);
         setSmartAppControl(true);
       }),
+      // The anti-tamper's report got the player banned (lib.rs closed the game): show only the ban.
+      listen("anticheat:banned", () => void checkBan()),
     ];
     return () => {
       unlisten.forEach((p) => void p.then((off) => off()));
     };
-  }, [loadTerms, runUpdateCheck]);
+  }, [loadTerms, runUpdateCheck, checkBan]);
 
   const patchConfig = useCallback((patch: Partial<Config>) => {
     setConfig((prev) => {
@@ -608,9 +647,13 @@ export default function App() {
       <div className="bg__vignette" />
       <div className="bg__grain" />
 
-      <TitleBar tab={tab} onTab={setTab} profile={profile ?? null} onSignOut={() => void signOut()} />
+      <TitleBar tab={tab} onTab={setTab} profile={anticheat ? null : (profile ?? null)} onSignOut={() => void signOut()} />
 
       <main className="stage">
+        {anticheat ? (
+          <Welcome banned waiting={false} error={null} onConnect={() => {}} onCancel={() => {}} />
+        ) : (
+        <>
         {profile === null && (
           <Welcome
             waiting={connecting}
@@ -688,9 +731,11 @@ export default function App() {
             onSignOut={() => void signOut()}
           />
         )}
+        </>
+        )}
       </main>
 
-      {profile && termsOpen && terms && (
+      {profile && !anticheat && termsOpen && terms && (
         <TermsDialog
           key={terms.version}
           terms={terms}
@@ -716,7 +761,7 @@ export default function App() {
       {replayLink && <ReplayDialog key={replayLink} onClose={() => setReplayLink(null)} />}
       {smartAppControl && <SmartAppControlDialog onClose={() => setSmartAppControl(false)} />}
 
-      {profile && ban && !ban.permanent && banDialog && (
+      {profile && !anticheat && ban && !ban.permanent && banDialog && (
         <BanDialog ban={ban} why={banDialog} onClose={() => setBanDialog(null)} />
       )}
 
