@@ -52,8 +52,8 @@ pub struct AppState {
     discord: discord::Presence,
     /// The Download tab's worker state (download.rs).
     download: download::Downloader,
-    /// While the Discord window is open: where its outcome goes (the one-time
-    /// code, or why there is none). See `discord_connect`.
+    /// While a sign-in waits for the browser: where its outcome goes (the
+    /// one-time code, or why there is none). See `discord_connect`.
     signing_in: Arc<Mutex<Option<SignIn>>>,
     /// The platforms and types an idea is filed under, from the last page load.
     meta: Mutex<community::Meta>,
@@ -423,71 +423,43 @@ fn auth_status(state: State<'_, AppState>) -> auth::AuthState {
     }
 }
 
-/// "Connect with Discord": opens the website's launcher sign-in in a window of
-/// its own and waits until the player is through, or closes it. The site ends
-/// on /launcher/connected?code=…; that address is caught here, never loaded,
-/// and the code traded for the session (auth.rs).
-///
-/// The window is a plain web page with no access to the launcher: the app's
-/// capabilities (capabilities/default.json) are for the "main" window only.
+/// "Connect with Discord": opens the website's launcher sign-in in the player's
+/// own browser (a new tab when it is open) and waits until they are through. The
+/// site ends on /launcher/connected?code=…, a page that hands the code back with
+/// an sp-launcher://connected?code=… link (the deep-link handler, `link_opened`);
+/// the code is traded here for the session (auth.rs). The PKCE verifier never
+/// leaves the launcher, so the code is useless to whatever else sees the link.
 #[tauri::command]
 async fn discord_connect(app: AppHandle, state: State<'_, AppState>) -> Result<auth::Profile> {
+    use tauri_plugin_opener::OpenerExt;
     let pkce = auth::pkce()?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     // A new attempt replaces an old one; its waiter hears "cancelled".
     if let Some(old) = state.signing_in.lock().expect("sign-in mutex").replace(tx) {
         let _ = old.send(Err("cancelled".into()));
     }
-    if let Some(open) = app.get_webview_window(DISCORD_WINDOW) {
-        let _ = open.destroy();
-    }
 
     let sign_in = auth::sign_in_url(&pkce.challenge);
-    // Never a window with an error page in it: a site that cannot sign anyone
-    // in right now is said on the welcome screen instead.
+    // Never a browser tab with an error page in it: a site that cannot sign
+    // anyone in right now is said on the welcome screen instead.
     if let Err(e) = auth::check_sign_in(&sign_in).await {
         state.signing_in.lock().expect("sign-in mutex").take();
         return Err(e);
     }
-    let url: tauri::Url = sign_in.parse().map_err(|_| LauncherError::Message(auth::OOPS.into()))?;
-    let slot = state.signing_in.clone();
-    let mut builder = tauri::WebviewWindowBuilder::new(&app, DISCORD_WINDOW, tauri::WebviewUrl::External(url))
-        .title("Connect with Discord")
-        .inner_size(500.0, 760.0)
-        .resizable(false)
-        .center()
-        // Private, like an incognito tab: nothing from an earlier sign-in is
-        // remembered, so each one asks for a Discord login (or the Discord
-        // app's approval) afresh, and no Discord session stays on the PC.
-        .incognito(true)
-        .on_navigation(move |url| match auth::read_connected(url.as_str()) {
-            Some(outcome) => {
-                if let Some(tx) = slot.lock().expect("sign-in mutex").take() {
-                    let _ = tx.send(outcome);
-                }
-                false
-            }
-            None => true,
-        });
-    if let Some(main) = app.get_webview_window("main") {
-        builder = builder.parent(&main).map_err(|e| LauncherError::Message(e.to_string()))?;
+    if app.opener().open_url(sign_in.as_str(), None::<&str>).is_err() {
+        state.signing_in.lock().expect("sign-in mutex").take();
+        return Err(LauncherError::Message(NO_BROWSER.into()));
     }
-    let window = builder.build().map_err(|_| LauncherError::Message(auth::OOPS.into()))?;
-    let slot = state.signing_in.clone();
-    window.on_window_event(move |event| {
-        if let WindowEvent::Destroyed = event {
-            if let Some(tx) = slot.lock().expect("sign-in mutex").take() {
-                let _ = tx.send(Err("cancelled".into()));
-            }
-        }
-    });
 
-    let outcome = rx.await.unwrap_or_else(|_| Err("cancelled".into()));
-    if let Some(open) = app.get_webview_window(DISCORD_WINDOW) {
-        let _ = open.destroy();
-    }
+    // The player may walk away: after SIGN_IN_WAIT the wait ends as if they had
+    // pressed Cancel, and the welcome screen offers the button again.
+    let outcome = match tokio::time::timeout(SIGN_IN_WAIT, rx).await {
+        Ok(Ok(outcome)) => outcome,
+        _ => Err("cancelled".into()),
+    };
+    state.signing_in.lock().expect("sign-in mutex").take();
     if let Some(main) = app.get_webview_window("main") {
-        let _ = main.set_focus();
+        show_from_tray_window(&main);
     }
     let code = outcome.map_err(LauncherError::Message)?;
 
@@ -504,17 +476,34 @@ async fn discord_connect(app: AppHandle, state: State<'_, AppState>) -> Result<a
     Ok(profile)
 }
 
-const DISCORD_WINDOW: &str = "discord";
+const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+const NO_BROWSER: &str = "Oops, the launcher could not open your web browser. Set a default browser in Windows and try again.";
 
-/// The welcome screen's Cancel: closes the Discord window, which ends the wait.
+/// The welcome screen's Cancel: ends the wait (the browser tab stays; a link
+/// from it afterwards finds nobody waiting and is ignored).
 #[tauri::command]
-fn discord_cancel(app: AppHandle, state: State<'_, AppState>) {
+fn discord_cancel(state: State<'_, AppState>) {
     if let Some(tx) = state.signing_in.lock().expect("sign-in mutex").take() {
         let _ = tx.send(Err("cancelled".into()));
     }
-    if let Some(open) = app.get_webview_window(DISCORD_WINDOW) {
-        let _ = open.destroy();
+}
+
+/// An sp-launcher:// link Windows handed over: the browser's sign-in coming
+/// back (sp-launcher://connected?…, for a sign-in that is waiting), or a
+/// reported match's replay.
+fn link_opened(app: &AppHandle, url: &str) {
+    if let Some(outcome) = auth::read_link(url) {
+        if let Some(state) = app.try_state::<AppState>() {
+            if let Some(tx) = state.signing_in.lock().expect("sign-in mutex").take() {
+                let _ = tx.send(outcome);
+            }
+        }
+        if let Some(window) = app.get_webview_window("main") {
+            show_from_tray_window(&window);
+        }
+        return;
     }
+    replay_link_opened(app, url);
 }
 
 #[tauri::command]
@@ -1283,7 +1272,8 @@ pub fn run() {
                 replay_link: Mutex::new(None),
             });
 
-            // sp-launcher:// links: a reported match's "Open in the launcher"
+            // sp-launcher:// links: the browser's Discord sign-in coming back
+            // (discord_connect) and a reported match's "Open in the launcher"
             // (replays.rs). Registered with Windows on every start too, not
             // only by the installer, so a launcher that updated itself or runs
             // from elsewhere still gets them. One that is running already gets
@@ -1296,12 +1286,12 @@ pub fn run() {
                 let handle = app.handle().clone();
                 app.deep_link().on_open_url(move |event| {
                     for url in event.urls() {
-                        replay_link_opened(&handle, url.as_str());
+                        link_opened(&handle, url.as_str());
                     }
                 });
                 if let Ok(Some(urls)) = app.deep_link().get_current() {
                     for url in urls {
-                        replay_link_opened(app.handle(), url.as_str());
+                        link_opened(app.handle(), url.as_str());
                     }
                 }
             }
