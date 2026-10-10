@@ -25,6 +25,9 @@ use std::time::{Duration, SystemTime};
 pub const ENV: &str = "SP_REPORT_DIR";
 /// How often the folder is looked at while the game runs.
 pub const EVERY: Duration = Duration::from_secs(5);
+/// How many passes (one each [`EVERY`]) still go after the game closed, while a
+/// report waits: a minute.
+pub const PASSES_AFTER_CLOSE: u32 = 12;
 const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
 /// A report is well under 4 KB; anything much bigger is not one.
 const MAX_BYTES: u64 = 32 * 1024;
@@ -39,6 +42,11 @@ pub fn prepare(config_dir: &Path) -> Option<PathBuf> {
     let dir = config_dir.join("reports");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
+}
+
+/// Whether a report is still waiting in the folder.
+pub fn has_pending(dir: &Path) -> bool {
+    !pending(dir, "report-").is_empty()
 }
 
 /// The files waiting with a given name prefix, oldest first (the DLL names them
@@ -375,6 +383,49 @@ mod tests {
             assert!(text.contains(&format!(r#""replay_bytes":{zip_len}"#)) && text.contains(r#""replay_match":"kapi_2026-10-01_20-25""#), "{text}");
         }
         assert_eq!(seen.len(), 4, "the second report of that match did not upload it again");
+    }
+
+    #[tokio::test]
+    async fn a_replay_through_the_website_goes_in_parts_when_it_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let demos = tempfile::tempdir().unwrap();
+        let start = 1_790_900_000_000u64;
+        match_recording(demos.path(), "kapi_2026-10-10_21-40", start, false);
+        // A recording that does not zip small: three parts of 64 KB at most.
+        let mut noise = 0x2545_f491_4f6c_dd1du64;
+        let bytes: Vec<u8> = (0..150_000)
+            .map(|_| {
+                noise ^= noise << 13;
+                noise ^= noise >> 7;
+                noise ^= noise << 17;
+                noise as u8
+            })
+            .collect();
+        std::fs::write(demos.path().join("kapi_2026-10-10_21-40").join("MK3D.demo"), bytes).unwrap();
+        report(dir.path(), &format!("report-{}-1-1.json", start + 5 * 60_000), r#"{"v":1}"#);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let started: &'static str = Box::leak(
+            format!(r#"{{"id":"{0}","upload_url":"http://127.0.0.1:{port}/api/launcher/replays/{0}/file?until=1&sig=2","url":"https://superpeople.dev/replays/{0}","max_bytes":67108864,"part_bytes":65536}}"#, "cd".repeat(16))
+                .into_boxed_str(),
+        );
+        let (base, server) = server_on(port, vec![(200, started), (200, ""), (200, ""), (200, ""), (204, "")]).await;
+        let ctx = crate::replays::Ctx { demos: Some(demos.path().to_path_buf()), logs: None, site: base.clone(), running: false };
+        assert_eq!(send_all(&format!("{base}/api/launcher/report"), "s", dir.path(), &AtomicBool::new(false), &ctx).await, 1);
+        let seen = server.await.unwrap();
+        let mut zip = Vec::new();
+        for (i, put) in seen[1..4].iter().enumerate() {
+            let file = format!("PUT /api/launcher/replays/{}/file?until=1&sig=2&part={}&parts=3 ", "cd".repeat(16), i + 1);
+            assert!(put.head.starts_with(&file), "{}", put.head);
+            assert!(put.body.len() <= 65_536);
+            zip.extend_from_slice(&put.body);
+        }
+        assert!(zip.starts_with(b"PK"), "the parts, in order, are the zip");
+        let ask = String::from_utf8_lossy(&seen[0].body).to_string();
+        assert!(ask.contains(&format!(r#""bytes":{}"#, zip.len())), "{ask}");
+        let sent = String::from_utf8_lossy(&seen[4].body).to_string();
+        assert!(sent.contains(&format!(r#""replay_url":"https://superpeople.dev/replays/{}""#, "cd".repeat(16))), "{sent}");
     }
 
     #[tokio::test]

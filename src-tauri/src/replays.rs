@@ -20,6 +20,13 @@
 //! then there is nothing in Demos to find. 07.10.2026: reports made in a match
 //! went out at once with "no recording", since nothing was there yet.
 //!
+//! Some players' PCs never reach the website's storage while the website
+//! answers them (10.10.2026: six links in 50 s, no zip arrived, "it could not
+//! be sent"). When such a launcher asks again for the same recording, the
+//! website's link points at the website itself, which stores the zip, and says
+//! `part_bytes`: a request there takes 4.5 MB at most, so a bigger zip goes in
+//! parts (`&part=1&parts=3`, in order).
+//!
 //! A report made in the game's Replay menu is about the recording being
 //! watched, an earlier match. The game logs the one picked there
 //! (`LogTemp: Display: Selected ReplayName = <its folder>`), so the last such
@@ -319,11 +326,30 @@ enum Upload {
 }
 
 /// The website's answer: where to put the zip (a short-lived link into its
-/// storage) and the replay's page.
+/// storage, or onto the website itself) and the replay's page. `part_bytes`:
+/// the biggest part the link takes, for a link onto the website.
 #[derive(serde::Deserialize)]
 struct Started {
     upload_url: String,
     url: String,
+    #[serde(default)]
+    part_bytes: Option<u64>,
+}
+
+/// The upload link of each part: the link itself for one, else with
+/// `part=<n>&parts=<count>` added. Only a link onto the website says
+/// `part_bytes`; a storage link's signature would not take more.
+fn part_links(upload_url: &str, bytes: u64, part_bytes: Option<u64>) -> Vec<(String, std::ops::Range<usize>)> {
+    let size = part_bytes.filter(|&n| n >= 64 * 1024 && n < bytes).unwrap_or(bytes.max(1)) as usize;
+    let len = bytes as usize;
+    let count = len.div_ceil(size).max(1);
+    if count == 1 {
+        return vec![(upload_url.to_string(), 0..len)];
+    }
+    let join = if upload_url.contains('?') { '&' } else { '?' };
+    (0..count)
+        .map(|i| (format!("{upload_url}{join}part={}&parts={count}", i + 1), i * size..((i + 1) * size).min(len)))
+        .collect()
 }
 
 /// What the recording is called in a header: its folder's name, plain.
@@ -355,18 +381,30 @@ async fn upload(ctx: &Ctx, session: &str, dir: &Path, body: Vec<u8>) -> Upload {
         401 | 429 | 500..=599 => return Upload::Later,
         _ => return Upload::Refused,
     };
-    let put = client
-        .put(&started.upload_url)
-        .timeout(UPLOAD_TIMEOUT)
-        .header(reqwest::header::CONTENT_TYPE, "application/zip")
-        .body(body)
-        .send()
-        .await;
-    match put {
-        Ok(res) if res.status().is_success() => Upload::Stored { url: started.url, bytes },
-        // A link that ran out or a storage hiccup: the next pass asks for a new one.
-        _ => Upload::Later,
+    let host = started.upload_url.split('/').nth(2).unwrap_or("").to_string();
+    for (link, range) in part_links(&started.upload_url, bytes, started.part_bytes) {
+        let put = client
+            .put(&link)
+            .timeout(UPLOAD_TIMEOUT)
+            .header(reqwest::header::CONTENT_TYPE, "application/zip")
+            .body(body[range].to_vec())
+            .send()
+            .await;
+        // A link that ran out, a storage hiccup, a PC that does not reach it: the next pass asks
+        // for a new link (the website then gives one onto itself). Logged, so we see which.
+        match put {
+            Ok(res) if res.status().is_success() => {}
+            Ok(res) => {
+                eprintln!("[replays] upload of {bytes} bytes to {host}: HTTP {}", res.status().as_u16());
+                return Upload::Later;
+            }
+            Err(e) => {
+                eprintln!("[replays] upload of {bytes} bytes to {host} failed: {e}");
+                return Upload::Later;
+            }
+        }
     }
+    Upload::Stored { url: started.url, bytes }
 }
 
 // --------------------------------------------------- uploaded before ---
@@ -713,6 +751,26 @@ mod tests {
 
     const ME: &str = "f5a441e76deab1b92db6074e0d6ab07c";
     const MIN: u64 = 60_000;
+
+    #[test]
+    fn a_zip_goes_whole_to_storage_and_in_parts_to_the_website_when_it_says_so() {
+        let storage = "https://storage.example/media/replays/x/a.zip?X-Amz-Signature=1";
+        // A storage link: one PUT, whatever its size (no part_bytes).
+        assert_eq!(part_links(storage, 9_000_000, None), vec![(storage.to_string(), 0..9_000_000)]);
+        let site = "https://superpeople.dev/api/launcher/replays/ab/file?until=1&sig=2";
+        // Small enough: one PUT, the link as it is.
+        assert_eq!(part_links(site, 3_000_000, Some(4_000_000)), vec![(site.to_string(), 0..3_000_000)]);
+        // Bigger: parts in order, each at most part_bytes, the last one the rest.
+        let parts = part_links(site, 9_500_000, Some(4_000_000));
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], (format!("{site}&part=1&parts=3"), 0..4_000_000));
+        assert_eq!(parts[1], (format!("{site}&part=2&parts=3"), 4_000_000..8_000_000));
+        assert_eq!(parts[2], (format!("{site}&part=3&parts=3"), 8_000_000..9_500_000));
+        // Exactly two parts' worth.
+        assert_eq!(part_links(site, 8_000_000, Some(4_000_000)).len(), 2);
+        // A silly part size from the website is not taken.
+        assert_eq!(part_links(site, 9_500_000, Some(10)).len(), 1);
+    }
 
     #[test]
     fn the_replay_info_is_read_as_the_game_writes_it() {
