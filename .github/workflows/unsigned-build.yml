@@ -16,6 +16,10 @@ on:
         description: 'Optional sp-native branch/tag/SHA to build and test instead of using the latest release'
         type: string
         required: false
+      native_build_run_id:
+        description: 'Optional successful sp-native Build run ID for native_ref; otherwise use its latest successful Build'
+        type: string
+        required: false
 
 concurrency:
   group: unsigned-build-${{ github.ref }}
@@ -100,6 +104,38 @@ jobs:
             client-fixes
             pak/release
 
+      # pak/release is a historical baseline, not the pak built from this ref's
+      # assets. Use the native workflow's matching output before the DLL tests
+      # and launcher packaging, so a HUD/content change reaches the test build.
+      - name: Get the pak built from the requested native source
+        if: ${{ inputs.native_ref }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.SP_NATIVE_TOKEN }}
+          NATIVE_BUILD_RUN_ID: ${{ inputs.native_build_run_id }}
+        run: |
+          $commit = git -C native-source rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the native source commit.' }
+          $runId = $env:NATIVE_BUILD_RUN_ID
+          if ($runId) {
+            if ($runId -notmatch '^\d+$') { throw 'native_build_run_id must be a numeric Actions run ID.' }
+            $runJson = gh api "repos/superpeople-dev/sp-native/actions/runs/$runId"
+          } else {
+            $runJson = gh api repos/superpeople-dev/sp-native/actions/workflows/build.yml/runs --method GET -f "head_sha=$commit" -f status=success -f per_page=1 --jq '.workflow_runs[0]'
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the native Build run.' }
+          $nativeRun = $runJson | ConvertFrom-Json
+          if (-not $nativeRun -or $nativeRun.head_sha -ne $commit -or $nativeRun.path -ne '.github/workflows/build.yml' -or $nativeRun.conclusion -ne 'success') {
+            throw "Run sp-native's Build workflow successfully at $commit first, then retry with its native_build_run_id."
+          }
+          gh run download $nativeRun.id --repo superpeople-dev/sp-native --name bin-pak --dir native-pak
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the matching bin-pak artifact (it is kept for one day).' }
+          foreach ($name in @('BravoHotelGame-ClientFixes_P.pak', 'BravoHotelGame-ClientFixes_P.sig')) {
+            Copy-Item -LiteralPath (Join-Path native-pak $name) -Destination native-source/pak/release/ -ErrorAction Stop
+          }
+          "SP_NATIVE_BUILD_RUN_ID=$($nativeRun.id)" >> $env:GITHUB_ENV
+          "Native pak built at $commit`: $($nativeRun.html_url)" >> $env:GITHUB_STEP_SUMMARY
+
       - name: Build and test matching native DLLs
         if: ${{ inputs.native_ref }}
         shell: pwsh
@@ -125,7 +161,7 @@ jobs:
           $files = Get-ChildItem src-tauri/resources -Recurse -File | ForEach-Object {
             @{ name = $_.Name; sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() }
           }
-          @{ build = 'unsigned-source-build'; commit = $commit; files = @($files) } |
+          @{ build = 'unsigned-source-build'; commit = $commit; native_build_run_id = $env:SP_NATIVE_BUILD_RUN_ID; files = @($files) } |
             ConvertTo-Json -Depth 4 | Set-Content src-tauri/resources/sp-native.json
           "SP_PROXY_TEST_DRIVER=$((Resolve-Path native-build/proxy/fixture/Release/proxy_loader_fixture.exe).Path)" >> $env:GITHUB_ENV
 

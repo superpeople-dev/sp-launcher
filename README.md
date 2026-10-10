@@ -173,7 +173,18 @@ from launch arguments because the DLL handles ordered lookup; other
 
 The launcher explicitly sets `SP_CLIENT_FIXES_ENABLED` to `1` or `0` for each child. The no-Steam proxy loads the adjacent fixes DLL only for an enabled launch; there is no remote-thread injection. Fresh session events acknowledge successful DLL bootstrap (supported executable, mandatory PAK hooks and worker startup). Missing, blocked, incompatible or failed startup stops the game; a missing acknowledgement times out after 60 seconds. Object-dependent fixes still activate later as the game's objects appear. This requires proxy v15 and fixes DLL v19 or later; an older bundle cannot acknowledge startup.
 
-To test matching native changes before releasing them, manually run the **Unsigned Windows build** workflow with `native_ref` set to the `sp-native` branch, tag or commit. It builds/tests both DLLs, verifies the existing signed PAK against the new DLL, runs the cross-process startup tests, and embeds the pair. Its artifact includes source commit/hash provenance and the unsigned launcher executable. It does not publish a release or require the launcher signing key.
+To test matching native changes before releasing them, first run **Build** in
+`sp-native` at the branch, tag or commit and wait for it to succeed. Then manually
+run the launcher's **Unsigned Windows build** with `native_ref` set to that same
+ref. Optionally set `native_build_run_id` to the native Actions run ID; otherwise
+the latest successful Build at the source commit is selected. The workflow checks
+that the run succeeded at exactly that commit and downloads its `bin-pak` artifact
+(kept for one day). It builds/tests both DLLs with that matching pak, runs the
+cross-process startup tests, and embeds the pair. A native content or HUD change
+therefore uses the newly built pak rather than the historical `pak/release`
+baseline. Missing, expired or mismatched native outputs fail the build. Its artifact
+includes the native commit, build run ID, file hashes and unsigned launcher executable.
+It does not publish a release or require the launcher signing key.
 
 Unsigned builds use the latest published launcher release's version in the frontend package, Rust crate and Tauri metadata, so the existing release does not immediately trigger an update prompt. The workflow fails if that release cannot be read or its tag is not `vX.Y.Z`/`X.Y.Z`. A subsequent newer release can still trigger an update normally.
 
