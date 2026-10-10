@@ -3,10 +3,11 @@
 //! THE SHAPE OF THE THING
 //! ---------------------
 //! The player presses "Connect with Discord". The launcher opens the website's
-//! launcher sign-in in a window of its own (lib.rs `discord_connect`); the site
-//! sends them through Discord and ends on `/launcher/connected?code=…`. The
-//! launcher reads that one-time code from the window's address and trades it,
-//! with the PKCE verifier it made up front, for the player's session: the same
+//! launcher sign-in in the player's own browser (lib.rs `discord_connect`); the
+//! site sends them through Discord and ends on `/launcher/connected?code=…`, a
+//! page that hands the one-time code back with an
+//! `sp-launcher://connected?code=…` link. The launcher trades that code, with
+//! the PKCE verifier it made up front, for the player's session: the same
 //! signed session the website uses, 30 days long (sp-website lib/launcher.ts).
 //!
 //! That session is stored encrypted at rest with Windows DPAPI. It is what the
@@ -353,15 +354,15 @@ mod random {
 
 // -------------------------------------------------------------- sign-in ---
 
-/// Where the Discord window starts.
+/// Where the browser's sign-in starts.
 pub fn sign_in_url(challenge: &str) -> String {
     format!("{}/api/auth/launcher?challenge={challenge}", site_url())
 }
 
 /// The sign-in answers with a redirect on to Discord. Anything else -- the site
 /// down, an older site without the launcher sign-in, sign-in switched off --
-/// would show an error page in the Discord window, so it is checked before the
-/// window opens and said on the welcome screen instead.
+/// would show an error page in the browser, so it is checked before the tab
+/// opens and said on the welcome screen instead.
 pub async fn check_sign_in(url: &str) -> Result<()> {
     let client = identified(reqwest::Client::builder())
         .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
@@ -377,10 +378,24 @@ pub async fn check_sign_in(url: &str) -> Result<()> {
     }
 }
 
-/// What the Discord window's address says once the site is done with it:
-/// `None` while it is anywhere else, the one-time code, or why there is none.
+/// What the site's last sign-in page says (`/launcher/connected?…`, the
+/// address an older launcher's own window caught): `None` for any other
+/// address, the one-time code, or why there is none.
 pub fn read_connected(url: &str) -> Option<std::result::Result<String, String>> {
     let rest = url.strip_prefix(&format!("{}/launcher/connected", site_url()))?;
+    outcome_of(rest)
+}
+
+/// The same, handed back by the browser: `sp-launcher://connected?code=…` (or
+/// `?error=…`). `None` for any other sp-launcher:// link (a replay's).
+pub fn read_link(url: &str) -> Option<std::result::Result<String, String>> {
+    let rest = url.strip_prefix("sp-launcher://connected")?;
+    let rest = rest.strip_prefix('/').unwrap_or(rest);
+    outcome_of(rest)
+}
+
+/// `?code=…`, `?error=…` or nothing after the page's path.
+fn outcome_of(rest: &str) -> Option<std::result::Result<String, String>> {
     let query = match rest.as_bytes().first() {
         None => "",
         Some(b'?') => &rest[1..],
@@ -932,6 +947,19 @@ mod tests {
         // Another site with the same path is not ours.
         assert_eq!(read_connected("https://evil.example/launcher/connected?code=abc"), None);
         assert!(matches!(read_connected(&format!("{site}/launcher/connected?code=<script>")), Some(Err(_))));
+    }
+
+    #[test]
+    fn the_browser_link_gives_the_code_and_nothing_else_does() {
+        assert_eq!(read_link("sp-launcher://connected?code=3f2a-9c"), Some(Ok("3f2a-9c".into())));
+        assert_eq!(read_link("sp-launcher://connected/?code=3f2a-9c"), Some(Ok("3f2a-9c".into())));
+        assert_eq!(read_link("sp-launcher://connected?error=banned"), Some(Err(BANNED_SIGN_IN.into())));
+        assert!(matches!(read_link("sp-launcher://connected?error=failed"), Some(Err(_))));
+        assert!(matches!(read_link("sp-launcher://connected"), Some(Err(_))));
+        assert!(matches!(read_link("sp-launcher://connected?code=<script>"), Some(Err(_))));
+        assert_eq!(read_link("sp-launcher://replay/0123456789abcdef0123456789abcdef"), None);
+        assert_eq!(read_link("sp-launcher://connectedX?code=x"), None);
+        assert_eq!(read_link("https://superpeople.dev/launcher/connected?code=x"), None);
     }
 
     #[test]

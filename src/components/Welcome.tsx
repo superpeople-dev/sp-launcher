@@ -1,7 +1,7 @@
 import logo from "../assets/sp-logo.png";
 
 interface Props {
-  /** The Discord window is open: waiting for the player to finish there. */
+  /** The sign-in is open in the browser: waiting for the player to finish there. */
   waiting: boolean;
   error: string | null;
   onConnect: () => void;
@@ -44,7 +44,7 @@ export function Welcome({ waiting, error, onConnect, onCancel, banned = false }:
         {waiting ? (
           <div className="welcome__waiting">
             <span className="spinner" aria-hidden />
-            <span>Finish signing in in the Discord window…</span>
+            <span>Finish signing in with Discord in your browser…</span>
             <button type="button" className="welcome__link" onClick={onCancel}>
               Cancel
             </button>
