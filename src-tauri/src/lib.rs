@@ -315,6 +315,16 @@ fn hide_to_tray(app: AppHandle) -> Result<()> {
     Ok(())
 }
 
+/// The tray's Play could not start the game (not installed, already running,
+/// terms, files, ban, an error): the window comes back to say why.
+#[tauri::command]
+fn show_from_tray(app: AppHandle) -> Result<()> {
+    if let Some(window) = app.get_webview_window("main") {
+        show_from_tray_window(&window);
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ auth ---
 //
 // The session never leaves this side except to go to the website. It is not
@@ -1300,9 +1310,13 @@ pub fn run() {
             // shipping a second asset. "Open" undoes hide_to_tray_window;
             // "Quit" is now the only real way to end the process, since
             // closing the window itself just hides it.
+            // "Play" asks the window's own Play (App.tsx, `tray:play`), so it
+            // goes through every check the button does; when the game can't
+            // start, the window opens on the reason.
+            let play_item = MenuItem::with_id(app, "play", "Play", true, None::<&str>)?;
             let show_item = MenuItem::with_id(app, "show", "Open SP Launcher", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let tray_menu = Menu::with_items(app, &[&play_item, &show_item, &quit_item])?;
 
             // Not `default_window_icon()`: the app icon keeps the whole mark,
             // wings included, which is 2.19:1 — in a square tray cell that
@@ -1319,6 +1333,9 @@ pub fn run() {
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
+                    "play" => {
+                        let _ = app.emit("tray:play", ());
+                    }
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
                             show_from_tray_window(&window);
@@ -1356,6 +1373,7 @@ pub fn run() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            show_from_tray,
             replay_link,
             replay_dismiss,
             replay_import,
