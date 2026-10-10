@@ -892,17 +892,25 @@ async fn launch_game(
     state.discord.set(discord::State::InGame);
 
     // Reports made with the game's Report button go to the staff (reports.rs):
-    // every few seconds while this game runs, and once more after it closes.
+    // every few seconds while this game runs, and for a minute after it closes.
     // With each goes the replay of its match (replays.rs), once the match is over.
+    // A player often closes the game right after the match: an upload that failed
+    // then gets its next tries (the website's link onto itself) in that minute,
+    // before the last pass sends the report without it.
     if let Some(dir) = reports_dir {
         let running_pid = state.running_pid.clone();
         let session = session.clone();
         let reports_app = app.clone();
         tauri::async_runtime::spawn(async move {
+            let mut passes_after_close = 0;
             loop {
                 tokio::time::sleep(reports::EVERY).await;
                 let closed = running_pid.lock().map(|running| *running != Some(pid)).unwrap_or(true);
-                reports::send_pending(&session, &dir, !closed).await;
+                if closed {
+                    passes_after_close += 1;
+                }
+                let last = closed && (passes_after_close >= reports::PASSES_AFTER_CLOSE || !reports::has_pending(&dir));
+                reports::send_pending(&session, &dir, !last).await;
                 // Banned for a debugger or a known cheat (sp-website app/api/launcher/tamper): the
                 // game closes now, even mid-match, and the UI shows only the ban (App.tsx).
                 if reports::send_tamper(&session, &dir).await {
@@ -911,7 +919,7 @@ async fn launch_game(
                     }
                     let _ = reports_app.emit("anticheat:banned", ());
                 }
-                if closed {
+                if last {
                     break;
                 }
             }
