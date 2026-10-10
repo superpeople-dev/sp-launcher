@@ -10,6 +10,7 @@ mod download;
 mod engine_ini;
 mod error;
 mod game;
+mod gpu_crash;
 mod hardware;
 mod integrity;
 mod pcid;
@@ -207,6 +208,12 @@ fn open_windows_security() -> Result<()> {
     } else {
         Err(LauncherError::Message("Windows Security could not be opened. Open it from the Start menu.".into()))
     }
+}
+
+/// The graphics-card crash window's button (gpu_crash.rs): DirectX 11 from the next start on.
+#[tauri::command]
+fn switch_to_directx11() -> Result<()> {
+    gpu_crash::switch_to_directx11()
 }
 
 #[tauri::command]
@@ -783,6 +790,23 @@ async fn launch_game(
         Err(e) => return Err(e),
     }
 
+    // An antivirus that takes the proxy away as soon as it is written: say so now, before the
+    // game starts and ends on the Client fixes PAK's signature ("Pak master signature table check
+    // failed", six crash reports from one PC on 09.10.2026). Real-time scanners act within moments
+    // of the write; the check after the start (client_fixes_startup) still catches a later one.
+    if cfg.client_fixes_enabled && shim::is_bundled() {
+        let proxy = shim::target_path(std::path::Path::new(&cfg.install_dir));
+        for _ in 0..4 {
+            if !proxy.is_file() {
+                return Err(client_fixes_startup::proxy_removed());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        if !proxy.is_file() {
+            return Err(client_fixes_startup::proxy_removed());
+        }
+    }
+
     // Windows 11's Smart App Control refuses DLLs without a trusted signature,
     // and ours are not code-signed yet: the game would stop at start with "Bad
     // Image" (0xc0e90002). Say so instead (smart_app_control.rs); the fixes
@@ -854,6 +878,8 @@ async fn launch_game(
         }
     }
 
+    // The game's crash folders written from now on are this run's (gpu_crash.rs).
+    let launched = std::time::SystemTime::now();
     let mut child = game::launch(game::LaunchSpec {
         install_dir: &cfg.install_dir,
         server: server.as_deref(),
@@ -954,6 +980,10 @@ async fn launch_game(
             presence.set(discord::State::InLauncher);
             let code = status.ok().and_then(|s| s.code());
             let _ = app.emit("game:exited", code);
+            // The graphics card gave up (gpu_crash.rs): the window offers DirectX 11.
+            if let Some(crash) = gpu_crash::after_exit(launched) {
+                let _ = app.emit("game:gpu-crash", crash);
+            }
             if let Some(window) = app.get_webview_window("main") {
                 show_from_tray_window(&window);
             }
@@ -1326,6 +1356,7 @@ pub fn run() {
             install_state,
             check_game_files,
             open_windows_security,
+            switch_to_directx11,
             open_install_dir,
             fetch_news,
             hosts_status,

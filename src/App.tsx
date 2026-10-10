@@ -13,6 +13,7 @@ import { Welcome } from "./components/Welcome";
 import { TermsDialog } from "./components/TermsDialog";
 import { ReplayDialog } from "./components/ReplayDialog";
 import { SmartAppControlDialog } from "./components/SmartAppControlDialog";
+import { GpuCrashDialog, type GpuCrash } from "./components/GpuCrashDialog";
 import { forgetRegion } from "./components/RegionPicker";
 import { BanDialog, bannedLine } from "./components/BanNotice";
 import { IdeasPanel } from "./components/community/IdeasPanel";
@@ -108,6 +109,7 @@ export default function App() {
   const [replayLink, setReplayLink] = useState<string | null>(null);
   // Play found Windows' Smart App Control blocking the game's DLLs (smart_app_control.rs).
   const [smartAppControl, setSmartAppControl] = useState(false);
+  const [gpuCrash, setGpuCrash] = useState<GpuCrash | null>(null);
 
   const [appVersion, setAppVersion] = useState("");
   const [update, setUpdate] = useState<Update | null>(null);
@@ -466,6 +468,8 @@ export default function App() {
       }),
       listen<string>("hosts:recovered", (e) => setNotice(e.payload)),
       listen<string>("hosts:error", (e) => setError(e.payload)),
+      // The game closed on a graphics-card crash (gpu_crash.rs): the window offers DirectX 11.
+      listen<GpuCrash>("game:gpu-crash", (e) => setGpuCrash(e.payload)),
       listen<string>("game:cleanup-failed", (e) => setError(`Client fixes cleanup failed: ${e.payload}`)),
       // The website stopped accepting the saved sign-in (lib.rs `expired`):
       // back to the welcome screen, saying why.
@@ -760,6 +764,7 @@ export default function App() {
 
       {replayLink && <ReplayDialog key={replayLink} onClose={() => setReplayLink(null)} />}
       {smartAppControl && <SmartAppControlDialog onClose={() => setSmartAppControl(false)} />}
+      {gpuCrash && <GpuCrashDialog crash={gpuCrash} onClose={() => setGpuCrash(null)} />}
 
       {profile && !anticheat && ban && !ban.permanent && banDialog && (
         <BanDialog ban={ban} why={banDialog} onClose={() => setBanDialog(null)} />

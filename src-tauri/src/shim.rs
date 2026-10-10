@@ -48,6 +48,11 @@ const SHIM: &[u8] = &[];
 /// the WHOLE process, not just for our hook.)
 const REL_PATH: &[&str] = &["BravoHotelGame", "Binaries", "Win64", "XAPOFX1_5.dll"];
 
+/// Whether this launcher carries the DLL at all (a checkout without the binary does not).
+pub fn is_bundled() -> bool {
+    !SHIM.is_empty()
+}
+
 pub fn target_path(install_dir: &Path) -> PathBuf {
     let mut p = install_dir.to_path_buf();
     for part in REL_PATH {
