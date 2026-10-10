@@ -81,9 +81,77 @@ pub struct HostsStatus {
     pub conflicts: Vec<String>,
 }
 
+/// The hosts file Windows' resolver actually reads: the one in the folder the
+/// Tcpip `DataBasePath` value names. That is normally
+/// `%SystemRoot%\System32\drivers\etc`, but "privacy" and debloat tools
+/// sometimes move it, or delete the folder altogether (`apply` creates it).
 pub fn hosts_path() -> PathBuf {
+    database_dir().unwrap_or_else(default_dir).join("hosts")
+}
+
+fn default_dir() -> PathBuf {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-    Path::new(&root).join(r"System32\drivers\etc\hosts")
+    Path::new(&root).join(r"System32\drivers\etc")
+}
+
+#[cfg(target_os = "windows")]
+fn database_dir() -> Option<PathBuf> {
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY_LOCAL_MACHINE, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+    };
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    let key = wide(r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters");
+    let value = wide("DataBasePath");
+    let mut buf = vec![0u16; 1024];
+    let mut size = (buf.len() * 2) as u32;
+    // SAFETY: key and value are NUL-terminated; buf holds `size` bytes, and
+    // RegGetValueW writes at most that much (and NUL-terminates).
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let len = (size as usize / 2).min(buf.len());
+    let raw = String::from_utf16_lossy(&buf[..len]);
+    let dir = expand_env(raw.trim_end_matches('\0').trim(), |name| std::env::var(name).ok());
+    (!dir.is_empty() && !dir.contains('%')).then(|| PathBuf::from(dir))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn database_dir() -> Option<PathBuf> {
+    None
+}
+
+/// Replaces each `%NAME%` with its value; an unknown name stays as it is.
+fn expand_env(text: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('%') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('%') else { break };
+        out.push_str(&rest[..start]);
+        let name = &after[..end];
+        match lookup(name) {
+            Some(value) if !name.is_empty() => out.push_str(&value),
+            _ => {
+                out.push('%');
+                out.push_str(name);
+                out.push('%');
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 // ----------------------------------------------------------- pure editing ---
@@ -262,11 +330,18 @@ fn sentinel_path(config_dir: &Path) -> PathBuf {
     config_dir.join(SENTINEL)
 }
 
+/// The file's text; empty when the file, or its whole folder, is missing
+/// (`write` then creates them).
 pub fn read() -> Result<String> {
-    let path = hosts_path();
-    std::fs::read_to_string(&path).map_err(|e| {
-        LauncherError::Message(format!("cannot read {}: {e}", path.display()))
-    })
+    read_from(&hosts_path())
+}
+
+fn read_from(path: &Path) -> Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(LauncherError::Message(format!("cannot read {}: {e}", path.display()))),
+    }
 }
 
 /// True when the process can actually modify the hosts file. This tests the
@@ -292,7 +367,19 @@ fn write(content: &str) -> Result<()> {
 // open the file to everyone as it would on Unix.
 #[allow(clippy::permissions_set_readonly_false)]
 fn write_in_place(path: &Path, content: &str) -> std::io::Result<()> {
-    let mut perms = std::fs::metadata(path)?.permissions();
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        // No hosts file, or no folder for it: create them. The new file takes
+        // the folder's permissions, as the one Windows ships does.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            return std::fs::write(path, content);
+        }
+        Err(e) => return Err(e),
+    };
+    let mut perms = meta.permissions();
     let was_read_only = perms.readonly();
     if was_read_only {
         perms.set_readonly(false);
@@ -767,6 +854,35 @@ mod tests {
     }
 
     const PLAIN: &str = "# Copyright\n127.0.0.1 localhost\n";
+
+    #[test]
+    fn missing_folder_reads_empty_and_is_created_on_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(r"drivers\etc\hosts");
+        assert_eq!(read_from(&path).unwrap(), "", "no folder reads as an empty file");
+
+        let applied = with_block(&read_from(&path).unwrap(), "127.0.0.1", &hosts());
+        write_in_place(&path, &applied).unwrap();
+        assert_eq!(read_from(&path).unwrap(), applied);
+        assert!(is_current(&applied, "127.0.0.1", &hosts()));
+    }
+
+    #[test]
+    fn expands_database_path() {
+        let lookup = |name: &str| (name.eq_ignore_ascii_case("SystemRoot")).then(|| r"C:\WINDOWS".to_string());
+        assert_eq!(expand_env(r"%SystemRoot%\System32\drivers\etc", lookup), r"C:\WINDOWS\System32\drivers\etc");
+        assert_eq!(expand_env(r"D:\etc", lookup), r"D:\etc");
+        assert_eq!(expand_env(r"%Nope%\etc", lookup), r"%Nope%\etc", "unknown names stay");
+        assert_eq!(expand_env("50%", lookup), "50%");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn finds_this_pcs_hosts_file() {
+        // A stock Windows names the usual folder in the registry.
+        assert_eq!(database_dir(), Some(default_dir()));
+        assert!(hosts_path().is_file());
+    }
 
     #[test]
     fn adds_and_removes_cleanly() {
