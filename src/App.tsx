@@ -558,8 +558,16 @@ export default function App() {
   // decisions on the way to playing. The backend side is untouched --
   // `launch_game` still takes an address and passes it as the first argument --
   // so bringing the prompt back is a UI change only.
-  const onLaunch = useCallback(() => {
+  const onLaunch = useCallback((fromTray = false) => {
     if (!config) return;
+    // From the tray the window stays hidden; anything that stops the game
+    // brings it back so the player sees why.
+    const reveal = () => {
+      if (fromTray) {
+        setTab("play");
+        void invoke("show_from_tray").catch(() => {});
+      }
+    };
     setBusy(true);
     setError(null);
     // Settings are normally debounced. Flush them before launch so a toggle
@@ -571,6 +579,7 @@ export default function App() {
       const stop = await checkBan();
       if (stop) {
         setBusy(false);
+        reveal();
         if (!stop.permanent) setBanDialog("play");
         return;
       }
@@ -580,10 +589,39 @@ export default function App() {
     })().catch((e) => {
       setError(String(e));
       setBusy(false);
+      reveal();
     });
     // `busy` is cleared by the game:exited event, not here: the launcher
     // stays in the launched state for as long as the game is up.
   }, [config, checkBan]);
+
+  // The tray's Play (lib.rs): the same Play as the button, window hidden,
+  // when the button would say Play; otherwise the window opens on the Play
+  // tab, which shows why (sign in, get the game, terms, Verify files, ban,
+  // already running, launcher update).
+  const trayPlay = useRef<() => void>(() => {});
+  trayPlay.current = () => {
+    const ready =
+      !anticheat &&
+      profile &&
+      config &&
+      install.installed &&
+      !busy &&
+      termsAccepted &&
+      !(ban && !ban.permanent) &&
+      !(files && !files.ok) &&
+      !installingRef.current;
+    if (ready) {
+      onLaunch(true);
+    } else {
+      setTab(install.installed ? "play" : "download");
+      void invoke("show_from_tray").catch(() => {});
+    }
+  };
+  useEffect(() => {
+    const off = listen("tray:play", () => trayPlay.current());
+    return () => void off.then((f) => f());
+  }, []);
 
   const stopGame = useCallback(() => {
     void invoke("stop_game").catch((e) => setError(String(e)));
@@ -687,7 +725,7 @@ export default function App() {
             onUnlock={() => (terms ? setTermsOpen(true) : loadTerms(true))}
             onLaunchArgs={(launch_args) => patchConfig({ launch_args })}
             onPrimary={onPrimary}
-            onLaunch={onLaunch}
+            onLaunch={() => onLaunch()}
             onStop={stopGame}
             onError={setError}
           />
