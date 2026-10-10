@@ -711,7 +711,7 @@ async fn run(ctx: &Ctx, source: &Source, mut saved: Saved, verify: bool) -> std:
     let client = http_client()?;
     let mut list = fetch_list()
         .await
-        .map_err(|e| Stop::Failed(format!("Could not get the list of the game's files from superpeople.dev: {e}")))?;
+        .map_err(|e| Stop::Failed(with_stall_hint(format!("Could not get the list of the game's files from superpeople.dev: {e}"))))?;
     // The startup pictures are the launcher's own (startup_images.rs, written
     // by `finish`): never fetched, never "repaired" back to the original.
     list.files.retain(|f| !crate::startup_images::is_ours(&f.path));
@@ -1680,7 +1680,22 @@ async fn hash_prefix(part: &Path, len: u64) -> std::result::Result<Sha256, Stop>
 }
 
 fn retry_exhausted() -> String {
-    format!("The download kept failing ({MAX_RETRIES} tries). Your progress is kept -- press Continue to try again later.")
+    format!("The download kept failing ({MAX_RETRIES} tries). Your progress is kept -- press Continue to try again later. {STALL_HINT}")
+}
+
+/// What a player can do when the connection keeps stopping. 10.10.2026: a
+/// player in Russia could not even get the 21 KB file list, three tries of 30 s
+/// each ("error decoding response body ... operation timed out"): providers
+/// there are known to stall connections to foreign servers after a few KB.
+const STALL_HINT: &str = "Your internet connection keeps stopping the download. Some internet providers (in Russia, for example) slow down or block connections to servers abroad, like the ones the game downloads from. Try again with a VPN, or on another network such as a phone hotspot. Once the game is installed, you can play without it.";
+
+/// A list error from the network (not the site refusing it) gets the hint.
+fn with_stall_hint(message: String) -> String {
+    if message.contains("network: ") && !message.contains("status client error") {
+        format!("{message}. {STALL_HINT}")
+    } else {
+        message
+    }
 }
 
 /// Waits before a file's next try; false once its retry budget is spent.
@@ -2598,6 +2613,17 @@ mod tests {
         let list = fetch_list_from(&url, &NO_WAIT).await.expect("the third try brings the list");
         assert_eq!(list.files.len(), 1);
         assert_eq!(seen.lock().unwrap().len(), 3, "a cut-off answer and a dropped connection were asked again");
+    }
+
+    #[test]
+    fn a_stalled_connection_says_what_the_player_can_do() {
+        let stalled = with_stall_hint("Could not get the list: network: error decoding response body: operation timed out (3 tries)".into());
+        assert!(stalled.ends_with(STALL_HINT) && stalled.contains("VPN"), "{stalled}");
+        let refused = with_stall_hint("Could not get the list: network: HTTP status client error (403 Forbidden)".into());
+        assert!(!refused.contains("VPN"), "the site refusing is no connection problem: {refused}");
+        let invalid = with_stall_hint("Could not get the list: the list is not valid (no files)".into());
+        assert!(!invalid.contains("VPN"));
+        assert!(retry_exhausted().contains("VPN"), "a download that kept failing says it too");
     }
 
     #[tokio::test]
