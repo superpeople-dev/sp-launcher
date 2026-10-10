@@ -17,7 +17,7 @@ on:
         type: string
         required: false
       native_build_run_id:
-        description: 'Optional successful sp-native Build run ID for native_ref; otherwise use its latest successful Build'
+        description: 'sp-native Build run ID published with tools/publish-native-test-inputs.ps1 (required with native_ref)'
         type: string
         required: false
 
@@ -117,24 +117,28 @@ jobs:
           $commit = git -C native-source rev-parse HEAD
           if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the native source commit.' }
           $runId = $env:NATIVE_BUILD_RUN_ID
-          if ($runId) {
-            if ($runId -notmatch '^\d+$') { throw 'native_build_run_id must be a numeric Actions run ID.' }
-            $runJson = gh api "repos/superpeople-dev/sp-native/actions/runs/$runId"
-          } else {
-            $runJson = gh api repos/superpeople-dev/sp-native/actions/workflows/build.yml/runs --method GET -f "head_sha=$commit" -f status=success -f per_page=1 --jq '.workflow_runs[0]'
+          if ($runId -notmatch '^\d+$') { throw 'Publish a successful native Build with tools/publish-native-test-inputs.ps1 and provide its native_build_run_id.' }
+          $manifestName = "NativeBuild-$runId.json"
+          gh release download inputs --repo superpeople-dev/sp-native --pattern $manifestName --dir native-pak
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the native test build inputs.' }
+          $nativeRun = Get-Content -LiteralPath (Join-Path native-pak $manifestName) -Raw | ConvertFrom-Json
+          if ($nativeRun.commit -ne $commit -or "$($nativeRun.run_id)" -ne $runId -or $nativeRun.workflow -ne '.github/workflows/build.yml' -or $nativeRun.conclusion -ne 'success' -or $nativeRun.files.Count -ne 2) {
+            throw "Native test build inputs do not describe a successful Build at $commit."
           }
-          if ($LASTEXITCODE -ne 0) { throw 'Could not read the native Build run.' }
-          $nativeRun = $runJson | ConvertFrom-Json
-          if (-not $nativeRun -or $nativeRun.head_sha -ne $commit -or $nativeRun.path -ne '.github/workflows/build.yml' -or $nativeRun.conclusion -ne 'success') {
-            throw "Run sp-native's Build workflow successfully at $commit first, then retry with its native_build_run_id."
-          }
-          gh run download $nativeRun.id --repo superpeople-dev/sp-native --name bin-pak --dir native-pak
-          if ($LASTEXITCODE -ne 0) { throw 'Could not download the matching bin-pak artifact (it is kept for one day).' }
           foreach ($name in @('BravoHotelGame-ClientFixes_P.pak', 'BravoHotelGame-ClientFixes_P.sig')) {
-            Copy-Item -LiteralPath (Join-Path native-pak $name) -Destination native-source/pak/release/ -ErrorAction Stop
+            $file = @($nativeRun.files | Where-Object name -eq $name)
+            if ($file.Count -ne 1 -or $file[0].sha256 -notmatch '^[a-f0-9]{64}$' -or $file[0].bytes -le 0) { throw "Invalid native input: $name" }
+            $file = $file[0]
+            $extension = [IO.Path]::GetExtension($name)
+            if ($file.asset -ne "ClientFixes-$($file.sha256)$extension") { throw "Invalid native asset name: $name" }
+            gh release download inputs --repo superpeople-dev/sp-native --pattern $file.asset --dir native-pak
+            if ($LASTEXITCODE -ne 0) { throw "Could not download native input: $name" }
+            $download = Join-Path native-pak $file.asset
+            if ((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLower() -ne $file.sha256 -or (Get-Item -LiteralPath $download).Length -ne $file.bytes) { throw "Native input checksum mismatch: $name" }
+            Copy-Item -LiteralPath $download -Destination (Join-Path native-source/pak/release $name) -ErrorAction Stop
           }
-          "SP_NATIVE_BUILD_RUN_ID=$($nativeRun.id)" >> $env:GITHUB_ENV
-          "Native pak built at $commit`: $($nativeRun.html_url)" >> $env:GITHUB_STEP_SUMMARY
+          "SP_NATIVE_BUILD_RUN_ID=$runId" >> $env:GITHUB_ENV
+          "Native pak built at $commit`: https://github.com/superpeople-dev/sp-native/actions/runs/$runId" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Build and test matching native DLLs
         if: ${{ inputs.native_ref }}
